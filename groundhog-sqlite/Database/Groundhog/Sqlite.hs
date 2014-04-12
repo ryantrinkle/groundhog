@@ -2,14 +2,16 @@
 module Database.Groundhog.Sqlite
     ( withSqlitePool
     , withSqliteConn
+    , createSqlitePool
     , runDbConn
-    , Sqlite
+    , Sqlite(..)
     , module Database.Groundhog
     , module Database.Groundhog.Generic.Sql.Functions
     ) where
 
 import Database.Groundhog
 import Database.Groundhog.Core
+import Database.Groundhog.Expression
 import Database.Groundhog.Generic
 import Database.Groundhog.Generic.Migration hiding (MigrationPack(..))
 import qualified Database.Groundhog.Generic.Migration as GM
@@ -46,26 +48,34 @@ instance DbDescriptor Sqlite where
   backendName _ = "sqlite"
 
 instance SqlDb Sqlite where
-  append a b = Expr $ operator 50 "||" a b
+  append a b = mkExpr $ operator 50 "||" a b
+  signum' x = mkExpr $ Snippet $ \esc _ -> let
+       x' = renderExpr esc (toExpr x)
+    in ["case when (" <> x' <> ") > 0 then 1 when (" <> x' <> ") < 0 then -1 else 0 end"]
+  quotRem' x y = (mkExpr $ operator 70 "/" x y, mkExpr $ operator 70 "%" x y)
+  equalsOperator a b = a <> " IS " <> b
+  notEqualsOperator a b = a <> " IS NOT " <> b
 
 instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => PersistBackend (DbPersist Sqlite m) where
   {-# SPECIALIZE instance PersistBackend (DbPersist Sqlite (NoLoggingT IO)) #-}
   type PhantomDb (DbPersist Sqlite m) = Sqlite
   insert v = insert' v
   insert_ v = insert_' v
-  insertBy u v = H.insertBy escapeS queryRawTyped u v
-  insertByAll v = H.insertByAll escapeS queryRawTyped v
-  replace k v = H.replace escapeS queryRawTyped executeRawCached' insertIntoConstructorTable k v
-  select options = H.select escapeS queryRawTyped "LIMIT -1" renderCond' options -- select' options
-  selectAll = H.selectAll escapeS queryRawTyped
-  get k = H.get escapeS queryRawTyped k
-  getBy k = H.getBy escapeS queryRawTyped k
-  update upds cond = H.update escapeS executeRawCached' renderCond' upds cond
-  delete cond = H.delete escapeS executeRawCached' renderCond' cond
-  deleteByKey k = H.deleteByKey escapeS executeRawCached' k
-  count cond = H.count escapeS queryRawTyped renderCond' cond
-  countAll fakeV = H.countAll escapeS queryRawTyped fakeV
-  project p options = H.project escapeS queryRawTyped "LIMIT -1" renderCond' p options
+  insertBy u v = H.insertBy renderConfig queryRawCached' True u v
+  insertByAll v = H.insertByAll renderConfig queryRawCached' True v
+  replace k v = H.replace renderConfig queryRawCached' executeRawCached' insertIntoConstructorTable k v
+  replaceBy k v = H.replaceBy renderConfig executeRawCached' k v
+  select options = H.select renderConfig queryRawCached' "LIMIT -1"  options
+  selectAll = H.selectAll renderConfig queryRawCached'
+  get k = H.get renderConfig queryRawCached' k
+  getBy k = H.getBy renderConfig queryRawCached' k
+  update upds cond = H.update renderConfig executeRawCached' upds cond
+  delete cond = H.delete renderConfig executeRawCached' cond
+  deleteBy k = H.deleteBy renderConfig executeRawCached' k
+  deleteAll v = H.deleteAll renderConfig executeRawCached' v
+  count cond = H.count renderConfig queryRawCached' cond
+  countAll fakeV = H.countAll renderConfig queryRawCached' fakeV
+  project p options = H.project renderConfig queryRawCached' "LIMIT -1" p options
   migrate fakeV = migrate' fakeV
 
   executeRaw False query ps = executeRaw' (fromString query) ps
@@ -77,6 +87,7 @@ instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => PersistBackend (Db
   getList k = getList' k
 
 instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => SchemaAnalyzer (DbPersist Sqlite m) where
+  schemaExists = error "schemaExists: is not supported by Sqlite"
   listTables _ = queryRaw' "SELECT name FROM sqlite_master WHERE type='table'" [] (mapAllRows $ return . fst . fromPurePersistValues proxy)
   listTableTriggers _ name = queryRaw' "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=?" [toPrimitivePersistValue proxy name] (mapAllRows $ return . fst . fromPurePersistValues proxy)
   analyzeTable = analyzeTable'
@@ -88,33 +99,37 @@ instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => SchemaAnalyzer (Db
   analyzeFunction = error "analyzeFunction: is not supported by Sqlite"
 
 withSqlitePool :: (MonadBaseControl IO m, MonadIO m)
-               => String
+               => String -- ^ connection string
                -> Int -- ^ number of connections to open
                -> (Pool Sqlite -> m a)
                -> m a
-withSqlitePool s connCount f = liftIO (createPool (open' s) close' 1 20 connCount) >>= f
+withSqlitePool s connCount f = createSqlitePool s connCount >>= f
 
 withSqliteConn :: (MonadBaseControl IO m, MonadIO m)
-               => String
+               => String -- ^ connection string
                -> (Sqlite -> m a)
                -> m a
 withSqliteConn s = bracket (liftIO $ open' s) (liftIO . close')
 
+createSqlitePool :: MonadIO m
+                 => String -- ^ connection string
+                 -> Int -- ^ number of connections to open
+                 -> m (Pool Sqlite)
+createSqlitePool s connCount = liftIO $ createPool (open' s) close' 1 20 connCount
+
 instance Savepoint Sqlite where
   withConnSavepoint name m (Sqlite c _) = do
-    let runStmt query = S.prepare c query >>= \stmt -> S.step stmt >> S.finalize stmt
     let name' = fromString name
-    liftIO $ runStmt $ "SAVEPOINT " <> name'
-    x <- onException m (liftIO $ runStmt $ "ROLLBACK TO " <> name')
-    liftIO $ runStmt $ "RELEASE " <> name'
+    liftIO $ S.exec c $ "SAVEPOINT " <> name'
+    x <- onException m (liftIO $ S.exec c $ "ROLLBACK TO " <> name')
+    liftIO $ S.exec c $ "RELEASE " <> name'
     return x
 
 instance ConnectionManager Sqlite Sqlite where
   withConn f conn@(Sqlite c _) = do
-    let runStmt query = S.prepare c query >>= \stmt -> S.step stmt >> S.finalize stmt
-    liftIO $ runStmt "BEGIN"
-    x <- onException (f conn) (liftIO $ runStmt "ROLLBACK")
-    liftIO $ runStmt "COMMIT"
+    liftIO $ S.exec c "BEGIN"
+    x <- onException (f conn) (liftIO $ S.exec c "ROLLBACK")
+    liftIO $ S.exec c "COMMIT"
     return x
   withConnNoTransaction f conn = f conn
 
@@ -137,7 +152,7 @@ close' (Sqlite conn smap) = do
   S.close conn
 
 migrate' :: (PersistEntity v, MonadBaseControl IO m, MonadIO m, MonadLogger m) => v -> Migration (DbPersist Sqlite m)
-migrate' = migrateRecursively (migrateEntity migrationPack) (migrateList migrationPack)
+migrate' = migrateRecursively (const $ return $ Right []) (migrateEntity migrationPack) (migrateList migrationPack)
 
 migrationPack :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => GM.MigrationPack (DbPersist Sqlite m)
 migrationPack = GM.MigrationPack
@@ -401,7 +416,7 @@ getList' k = do
   let valuesName = mainName <> delim' <> "values"
   let value = ("value", dbType (undefined :: a))
   let query = "SELECT " <> renderFields escapeS [value] <> " FROM " <> escapeS valuesName <> " WHERE id=? ORDER BY ord"
-  queryRawTyped query (getDbTypes (dbType (undefined :: a)) []) [toPrimitivePersistValue proxy k] $ mapAllRows (liftM fst . fromPersistValues)
+  queryRawCached' query [toPrimitivePersistValue proxy k] $ mapAllRows (liftM fst . fromPersistValues)
     
 getLastInsertRowId :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => DbPersist Sqlite m PersistValue
 getLastInsertRowId = do
@@ -470,19 +485,6 @@ queryRawCached' query vals f = do
         S.Done -> return Nothing
         S.Row  -> fmap (Just . map pFromSql) $ S.columns stmt
 
-queryRawTyped :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => Utf8 -> [DbType] -> [PersistValue] -> (RowPopper (DbPersist Sqlite m) -> DbPersist Sqlite m a) -> DbPersist Sqlite m a
-queryRawTyped query types vals f = do
-  $logDebugS "SQL" $ T.pack $ show (fromUtf8 query) ++ " " ++ show vals
-  stmt <- getStatementCached query
-  let types' = map typeToSqlite $ foldr getDbTypes [] types
-  flip finally (liftIO $ S.reset stmt) $ do
-    liftIO $ bind stmt vals
-    f $ liftIO $ do
-      x <- S.step stmt
-      case x of
-        S.Done -> return Nothing
-        S.Row  -> fmap (Just . map pFromSql) $ S.typedColumns stmt types'
-
 typeToSqlite :: DbType -> Maybe S.ColumnType
 typeToSqlite (DbTypePrimitive t nullable _ _) = case t of
   _ | nullable -> Nothing
@@ -520,17 +522,17 @@ escape s = '\"' : s ++ "\""
 escapeS :: Utf8 -> Utf8
 escapeS a = let q = fromChar '"' in q <> a <> q
 
-renderCond' :: Cond Sqlite r -> Maybe (RenderS Sqlite r)
-renderCond' = renderCond escapeS renderEquals renderNotEquals where
-  renderEquals a b = a <> " IS " <> b
-  renderNotEquals a b = a <> " IS NOT " <> b
+renderConfig :: RenderConfig
+renderConfig = RenderConfig {
+    esc = escapeS
+}
 
 defaultPriority, triggerPriority :: Int
 defaultPriority = 0
 triggerPriority = 1
 
-proxy :: Proxy Sqlite
-proxy = error "Proxy Sqlite"
+proxy :: proxy Sqlite
+proxy = error "proxy Sqlite"
 
 delim' :: Utf8
 delim' = fromChar delim

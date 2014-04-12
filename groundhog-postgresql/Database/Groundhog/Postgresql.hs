@@ -2,14 +2,18 @@
 module Database.Groundhog.Postgresql
     ( withPostgresqlPool
     , withPostgresqlConn
+    , createPostgresqlPool
     , runDbConn
-    , Postgresql (..)
+    , Postgresql(..)
     , module Database.Groundhog
     , module Database.Groundhog.Generic.Sql.Functions
+    , explicitType
+    , castType
     ) where
 
 import Database.Groundhog
 import Database.Groundhog.Core
+import Database.Groundhog.Expression
 import Database.Groundhog.Generic
 import Database.Groundhog.Generic.Migration hiding (MigrationPack(..))
 import qualified Database.Groundhog.Generic.Migration as GM
@@ -39,7 +43,7 @@ import Data.Function (on)
 import Data.Int (Int64)
 import Data.IORef
 import Data.List (groupBy, intercalate, stripPrefix)
-import Data.Maybe (fromJust, fromMaybe)
+import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Monoid
 import Data.Pool
 import Data.Time.LocalTime (localTimeToUTC, utc)
@@ -53,25 +57,35 @@ instance DbDescriptor Postgresql where
   backendName _ = "postgresql"
 
 instance SqlDb Postgresql where
-  append a b = Expr $ operator 50 "||" a b
+  append a b = mkExpr $ operator 50 "||" a b
+  signum' x = mkExpr $ function "sign" [toExpr x]
+  quotRem' x y = (mkExpr $ operator 70 "/" x y, mkExpr $ operator 70 "%" x y)
+  equalsOperator a b = a <> " IS NOT DISTINCT FROM " <> b
+  notEqualsOperator a b = a <> " IS DISTINCT FROM " <> b
+
+instance FloatingSqlDb Postgresql where
+  log' x = mkExpr $ function "ln" [toExpr x]
+  logBase' b x = log (liftExpr x) / log (liftExpr b)
 
 instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => PersistBackend (DbPersist Postgresql m) where
   type PhantomDb (DbPersist Postgresql m) = Postgresql
   insert v = insert' v
   insert_ v = insert_' v
-  insertBy u v = H.insertBy escapeS queryRawTyped' u v
-  insertByAll v = H.insertByAll escapeS queryRawTyped' v
-  replace k v = H.replace escapeS queryRawTyped' executeRaw' (insertIntoConstructorTable False) k v
-  select options = H.select escapeS queryRawTyped' "" renderCond' options
-  selectAll = H.selectAll escapeS queryRawTyped'
-  get k = H.get escapeS queryRawTyped' k
-  getBy k = H.getBy escapeS queryRawTyped' k
-  update upds cond = H.update escapeS executeRaw' renderCond' upds cond
-  delete cond = H.delete escapeS executeRaw' renderCond' cond
-  deleteByKey k = H.deleteByKey escapeS executeRaw' k
-  count cond = H.count escapeS queryRawTyped' renderCond' cond
-  countAll fakeV = H.countAll escapeS queryRawTyped' fakeV
-  project p options = H.project escapeS queryRawTyped' "" renderCond' p options
+  insertBy u v = H.insertBy renderConfig queryRaw' True u v
+  insertByAll v = H.insertByAll renderConfig queryRaw' True v
+  replace k v = H.replace renderConfig queryRaw' executeRaw' (insertIntoConstructorTable False) k v
+  replaceBy k v = H.replaceBy renderConfig executeRaw' k v
+  select options = H.select renderConfig queryRaw' "" options
+  selectAll = H.selectAll renderConfig queryRaw'
+  get k = H.get renderConfig queryRaw' k
+  getBy k = H.getBy renderConfig queryRaw' k
+  update upds cond = H.update renderConfig executeRaw' upds cond
+  delete cond = H.delete renderConfig executeRaw' cond
+  deleteBy k = H.deleteBy renderConfig executeRaw' k
+  deleteAll v = H.deleteAll renderConfig executeRaw' v
+  count cond = H.count renderConfig queryRaw' cond
+  countAll fakeV = H.countAll renderConfig queryRaw' fakeV
+  project p options = H.project renderConfig queryRaw' "" p options
   migrate fakeV = migrate' fakeV
 
   executeRaw _ query ps = executeRaw' (fromString query) ps
@@ -81,6 +95,7 @@ instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => PersistBackend (Db
   getList k = getList' k
 
 instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => SchemaAnalyzer (DbPersist Postgresql m) where
+  schemaExists schema = queryRaw' "SELECT 1 FROM information_schema.schemata WHERE schema_name=?" [toPrimitivePersistValue proxy schema] (fmap isJust)
   listTables schema = queryRaw' "SELECT table_name FROM information_schema.tables WHERE table_schema=coalesce(?,current_schema())" [toPrimitivePersistValue proxy schema] (mapAllRows $ return . fst . fromPurePersistValues proxy)
   listTableTriggers schema name = queryRaw' "SELECT trigger_name FROM information_schema.triggers WHERE event_object_schema=coalesce(?,current_schema()) AND event_object_table=?" [toPrimitivePersistValue proxy schema, toPrimitivePersistValue proxy name] (mapAllRows $ return . fst . fromPurePersistValues proxy)
   analyzeTable = analyzeTable'
@@ -95,20 +110,24 @@ instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => SchemaAnalyzer (Db
       Nothing  -> return Nothing
       Just src -> return (fst $ fromPurePersistValues proxy src)
 
---{-# SPECIALIZE withPostgresqlPool :: String -> Int -> (Pool Postgresql -> IO a) -> IO a #-}
 withPostgresqlPool :: (MonadBaseControl IO m, MonadIO m)
-               => String -- ^ connection string
-               -> Int -- ^ number of connections to open
-               -> (Pool Postgresql -> m a)
-               -> m a
-withPostgresqlPool s connCount f = liftIO (createPool (open' s) close' 1 20 connCount) >>= f
+                   => String -- ^ connection string
+                   -> Int -- ^ number of connections to open
+                   -> (Pool Postgresql -> m a)
+                   -> m a
+withPostgresqlPool s connCount f = createPostgresqlPool s connCount >>= f
 
-{-# SPECIALIZE withPostgresqlConn :: String -> (Postgresql -> IO a) -> IO a #-}
 withPostgresqlConn :: (MonadBaseControl IO m, MonadIO m)
-               => String -- ^ connection string
-               -> (Postgresql -> m a)
-               -> m a
+                   => String -- ^ connection string
+                   -> (Postgresql -> m a)
+                   -> m a
 withPostgresqlConn s = bracket (liftIO $ open' s) (liftIO . close')
+
+createPostgresqlPool :: MonadIO m
+                     => String -- ^ connection string
+                     -> Int -- ^ number of connections to open
+                     -> m (Pool Postgresql)
+createPostgresqlPool s connCount = liftIO $ createPool (open' s) close' 1 20 connCount
 
 instance Savepoint Postgresql where
   withConnSavepoint name m (Postgresql c) = do
@@ -237,10 +256,10 @@ executeRaw' query vals = do
     _ <- PG.execute conn stmt (map P vals)
     return ()
 
-renderCond' :: Cond Postgresql r -> Maybe (RenderS Postgresql r)
-renderCond' = renderCond escapeS renderEquals renderNotEquals where
-  renderEquals a b = a <> " IS NOT DISTINCT FROM " <> b
-  renderNotEquals a b = a <> " IS DISTINCT FROM " <> b
+renderConfig :: RenderConfig
+renderConfig = RenderConfig {
+    esc = escapeS
+}
 
 escapeS :: Utf8 -> Utf8
 escapeS a = let q = fromChar '"' in q <> a <> q
@@ -257,7 +276,8 @@ migrate' :: (PersistEntity v, MonadBaseControl IO m, MonadIO m, MonadLogger m) =
 migrate' v = do
   x <- lift $ queryRaw' "SELECT current_schema()" [] id
   let schema = fst $ fromPurePersistValues proxy $ fromJust x
-  migrateRecursively (migrateEntity $ migrationPack schema) (migrateList $ migrationPack schema) v
+      migPack = migrationPack schema
+  migrateRecursively (migrateSchema migPack) (migrateEntity migPack) (migrateList migPack) v
 
 migrationPack :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => String -> GM.MigrationPack (DbPersist Postgresql m)
 migrationPack currentSchema = GM.MigrationPack
@@ -269,7 +289,7 @@ migrationPack currentSchema = GM.MigrationPack
   migTriggerOnUpdate
   GM.defaultMigConstr
   escape
-  "SERIAL PRIMARY KEY UNIQUE"
+  "BIGSERIAL PRIMARY KEY UNIQUE"
   mainTableId
   defaultPriority
   (\uniques refs -> ([], map AddUnique uniques ++ map AddReference refs))
@@ -320,7 +340,7 @@ migTriggerOnDelete schema name deletes = do
             else [DropTrigger schema trigName schema name, addTrigger])
   return (trigExisted, funcMig ++ trigMig)
       
--- | Table name and a  list of field names and according delete statements
+-- | Table name and a list of field names and according delete statements
 -- assume that this function is called only for ephemeral fields
 migTriggerOnUpdate :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => Maybe String -> String -> [(String, String)] -> DbPersist Postgresql m [(Bool, [AlterDB])]
 migTriggerOnUpdate schema name dels = forM dels $ \(fieldName, del) -> do
@@ -416,6 +436,8 @@ showAlterDb (AddTriggerOnUpdate schTrg trigName schTbl tName fName body) = Right
     fName' = maybe (error $ "showAlterDb: AddTriggerOnUpdate does not have fieldName for trigger " ++ trigName) escape fName
 showAlterDb (CreateOrReplaceFunction s) = Right [(False, functionPriority, s)]
 showAlterDb (DropFunction sch funcName) = Right [(False, functionPriority, "DROP FUNCTION " ++ withSchema sch funcName ++ "()")]
+showAlterDb (CreateSchema sch ifNotExists) = Right [(False, schemaPriority, "CREATE SCHEMA " ++ ifNotExists' ++ escape sch)] where
+  ifNotExists' = if ifNotExists then "IF NOT EXISTS " else ""
 
 showAlterTable :: String -> AlterTable -> [(Bool, Int, String)]
 showAlterTable table (AddColumn col) = [(False, defaultPriority, concat
@@ -601,11 +623,12 @@ compareDefaults def1 def2 = Just def2 `elem` [Just def1, stripType def1, stripTy
   stripType = fmap reverse . stripPrefix "::" . dropWhile (\c -> isAlphaNum c || isSpace c) . reverse
   stripParens = stripPrefix "(" >=> fmap reverse . stripPrefix ")" . reverse
 
-defaultPriority, referencePriority, functionPriority, triggerPriority :: Int
-defaultPriority = 0
-referencePriority = 1
-functionPriority = 2
-triggerPriority = 3
+defaultPriority, schemaPriority, referencePriority, functionPriority, triggerPriority :: Int
+defaultPriority = 1
+schemaPriority = 0
+referencePriority = 2
+functionPriority = 3
+triggerPriority = 4
 
 mainTableId :: String
 mainTableId = "id"
@@ -618,9 +641,6 @@ escape s = '\"' : s ++ "\""
   
 getStatement :: Utf8 -> PG.Query
 getStatement sql = PG.Query $ fromUtf8 sql
-
-queryRawTyped' :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => Utf8 -> [DbType] -> [PersistValue] -> (RowPopper (DbPersist Postgresql m) -> DbPersist Postgresql m a) -> DbPersist Postgresql m a
-queryRawTyped' query _ vals f = queryRaw' query vals f
 
 queryRaw' :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => Utf8 -> [PersistValue] -> (RowPopper (DbPersist Postgresql m) -> DbPersist Postgresql m a) -> DbPersist Postgresql m a
 queryRaw' query vals f = do
@@ -727,8 +747,21 @@ getGetter (PG.Oid oid) = case oid of
 unBinary :: PG.Binary a -> a
 unBinary (PG.Binary x) = x
 
-proxy :: Proxy Postgresql
-proxy = error "Proxy Postgresql"
+proxy :: proxy Postgresql
+proxy = error "proxy Postgresql"
 
 withSchema :: Maybe String -> String -> String
 withSchema sch name = maybe "" (\x -> escape x ++ ".") sch ++ escape name
+
+-- | Put explicit type for expression. It is useful for values which are defaulted to a wrong type.
+-- For example, a literal Int from a 64bit machine can be defaulted to a 32bit int by Postgresql. 
+-- Also a value entered as an external string (geometry, arrays and other complex types have this representation) may need an explicit type. 
+explicitType :: (Expression Postgresql r a, PersistField a) => a -> Expr Postgresql r a
+explicitType a = castType a t where
+  t = case dbType a of
+    DbTypePrimitive t' _ _ _ -> showSqlType t'
+    _ -> error "explicitType: type is not primitive"
+
+-- | Casts expression to a type. @castType value \"INT\"@ results in @value::INT@.
+castType :: Expression Postgresql r a => a -> String -> Expr Postgresql r a
+castType a t = mkExpr $ Snippet $ \conf _ -> ["(" <> renderExpr conf (toExpr a) <> ")::" <> fromString t] where

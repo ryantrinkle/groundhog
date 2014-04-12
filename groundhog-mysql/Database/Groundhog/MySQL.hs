@@ -2,8 +2,9 @@
 module Database.Groundhog.MySQL
     ( withMySQLPool
     , withMySQLConn
+    , createMySQLPool
     , runDbConn
-    , MySQL
+    , MySQL(..)
     , module Database.Groundhog
     , module Database.Groundhog.Generic.Sql.Functions
     , MySQL.ConnectInfo(..)
@@ -43,7 +44,7 @@ import Data.Function (on)
 import Data.Int (Int64)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (groupBy, intercalate, intersect, partition, stripPrefix)
-import Data.Maybe (fromJust, fromMaybe)
+import Data.Maybe (fromJust, fromMaybe, isJust)
 import Data.Pool
 
 newtype MySQL = MySQL MySQL.Connection
@@ -54,25 +55,35 @@ instance DbDescriptor MySQL where
   backendName _ = "mysql"
 
 instance SqlDb MySQL where
-  append a b = Expr $ function "concat" [toExpr a, toExpr b]
+  append a b = mkExpr $ function "concat" [toExpr a, toExpr b]
+  signum' a = mkExpr $ function "sign" [toExpr a]
+  quotRem' x y = (mkExpr $ operator 70 " div " x y, mkExpr $ operator 70 " % " x y)
+  equalsOperator a b = a <> "<=>" <> b
+  notEqualsOperator a b = "NOT(" <> a <> "<=>" <> b <> ")"
+
+instance FloatingSqlDb MySQL where
+  log' a = mkExpr $ function "log" [toExpr a]
+  logBase' b x = mkExpr $ function "log" [toExpr b, toExpr x]
 
 instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => PersistBackend (DbPersist MySQL m) where
   type PhantomDb (DbPersist MySQL m) = MySQL
   insert v = insert' v
   insert_ v = insert_' v
-  insertBy u v = H.insertBy escapeS queryRawTyped' u v
-  insertByAll v = H.insertByAll escapeS queryRawTyped' v
-  replace k v = H.replace escapeS queryRawTyped' executeRaw' insertIntoConstructorTable k v
-  select options = H.select escapeS queryRawTyped' noLimit renderCond' options
-  selectAll = H.selectAll escapeS queryRawTyped'
-  get k = H.get escapeS queryRawTyped' k
-  getBy k = H.getBy escapeS queryRawTyped' k
-  update upds cond = H.update escapeS executeRaw' renderCond' upds cond
-  delete cond = H.delete escapeS executeRaw' renderCond' cond
-  deleteByKey k = H.deleteByKey escapeS executeRaw' k
-  count cond = H.count escapeS queryRawTyped' renderCond' cond
-  countAll fakeV = H.countAll escapeS queryRawTyped' fakeV
-  project p options = H.project escapeS queryRawTyped' noLimit renderCond' p options
+  insertBy u v = H.insertBy renderConfig queryRaw' True u v
+  insertByAll v = H.insertByAll renderConfig queryRaw' True v
+  replace k v = H.replace renderConfig queryRaw' executeRaw' insertIntoConstructorTable k v
+  replaceBy k v = H.replaceBy renderConfig executeRaw' k v
+  select options = H.select renderConfig queryRaw' noLimit options
+  selectAll = H.selectAll renderConfig queryRaw'
+  get k = H.get renderConfig queryRaw' k
+  getBy k = H.getBy renderConfig queryRaw' k
+  update upds cond = H.update renderConfig executeRaw' upds cond
+  delete cond = H.delete renderConfig executeRaw' cond
+  deleteBy k = H.deleteBy renderConfig executeRaw' k
+  deleteAll v = H.deleteAll renderConfig executeRaw' v
+  count cond = H.count renderConfig queryRaw' cond
+  countAll fakeV = H.countAll renderConfig queryRaw' fakeV
+  project p options = H.project renderConfig queryRaw' noLimit p options
   migrate fakeV = migrate' fakeV
 
   executeRaw _ query ps = executeRaw' (fromString query) ps
@@ -82,6 +93,7 @@ instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => PersistBackend (Db
   getList k = getList' k
 
 instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => SchemaAnalyzer (DbPersist MySQL m) where
+  schemaExists schema = queryRaw' "SELECT 1 FROM information_schema.schemata WHERE schema_name=?" [toPrimitivePersistValue proxy schema] (fmap isJust)
   listTables schema = queryRaw' "SELECT table_name FROM information_schema.tables WHERE table_schema=coalesce(?,database())" [toPrimitivePersistValue proxy schema] (mapAllRows $ return . fst . fromPurePersistValues proxy)
   listTableTriggers schema name = queryRaw' "SELECT trigger_name FROM information_schema.triggers WHERE event_object_schema=coalesce(?,database()) AND event_object_table=?" [toPrimitivePersistValue proxy schema, toPrimitivePersistValue proxy name] (mapAllRows $ return . fst . fromPurePersistValues proxy)
   analyzeTable = analyzeTable'
@@ -97,16 +109,22 @@ instance (MonadBaseControl IO m, MonadIO m, MonadLogger m) => SchemaAnalyzer (Db
       Just src -> return (fst $ fromPurePersistValues proxy src)
 
 withMySQLPool :: (MonadBaseControl IO m, MonadIO m)
-               => MySQL.ConnectInfo
-               -> Int -- ^ number of connections to open
-               -> (Pool MySQL -> m a)
-               -> m a
-withMySQLPool s connCount f = liftIO (createPool (open' s) close' 1 20 connCount) >>= f
+              => MySQL.ConnectInfo
+              -> Int -- ^ number of connections to open
+              -> (Pool MySQL -> m a)
+              -> m a
+withMySQLPool s connCount f = createMySQLPool s connCount >>= f
+
+createMySQLPool :: MonadIO m
+                => MySQL.ConnectInfo
+                -> Int -- ^ number of connections to open
+                -> m (Pool MySQL)
+createMySQLPool s connCount = liftIO $ createPool (open' s) close' 1 20 connCount
 
 withMySQLConn :: (MonadBaseControl IO m, MonadIO m)
-               => MySQL.ConnectInfo
-               -> (MySQL -> m a)
-               -> m a
+              => MySQL.ConnectInfo
+              -> (MySQL -> m a)
+              -> m a
 withMySQLConn s = bracket (liftIO $ open' s) (liftIO . close')
 
 instance Savepoint MySQL where
@@ -234,10 +252,10 @@ executeRaw' query vals = do
     _ <- MySQL.execute conn stmt (map P vals)
     return ()
 
-renderCond' :: Cond MySQL r -> Maybe (RenderS MySQL r)
-renderCond' = renderCond escapeS renderEquals renderNotEquals where
-  renderEquals a b = a <> "<=>" <> b
-  renderNotEquals a b = "NOT(" <> a <> "<=>" <> b <> ")"
+renderConfig :: RenderConfig
+renderConfig = RenderConfig {
+    esc = escapeS
+}
 
 escapeS :: Utf8 -> Utf8
 escapeS a = let q = fromChar '`' in q <> a <> q
@@ -254,7 +272,8 @@ migrate' :: (PersistEntity v, MonadBaseControl IO m, MonadIO m, MonadLogger m) =
 migrate' v = do
   x <- lift $ queryRaw' "SELECT database()" [] id
   let schema = fst $ fromPurePersistValues proxy $ fromJust x
-  migrateRecursively (migrateEntity $ migrationPack schema) (migrateList $ migrationPack schema) v
+      migPack = migrationPack schema
+  migrateRecursively (migrateSchema migPack) (migrateEntity migPack) (migrateList migPack) v
 
 migrationPack :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => String -> GM.MigrationPack (DbPersist MySQL m)
 migrationPack currentSchema = GM.MigrationPack
@@ -369,6 +388,8 @@ showAlterDb _ (AddTriggerOnDelete schTrg trigName schTbl tName body) = Right [(F
 showAlterDb _ (AddTriggerOnUpdate schTrg trigName schTbl tName _ body) = Right [(False, triggerPriority, "CREATE TRIGGER " ++ withSchema schTrg trigName ++ " AFTER UPDATE ON " ++ withSchema schTbl tName ++ " FOR EACH ROW BEGIN " ++ body ++ "END")]
 showAlterDb _ (CreateOrReplaceFunction s) = Right [(False, functionPriority, s)]
 showAlterDb _ (DropFunction sch funcName) = Right [(False, functionPriority, "DROP FUNCTION " ++ withSchema sch funcName ++ "()")]
+showAlterDb _ (CreateSchema sch ifNotExists) = Right [(False, schemaPriority, "CREATE DATABASE " ++ ifNotExists' ++ escape sch)] where
+  ifNotExists' = if ifNotExists then "IF NOT EXISTS " else ""
 
 showAlterTable :: String -> String -> AlterTable -> [(Bool, Int, String)]
 showAlterTable _ table (AddColumn col) = [(False, defaultPriority, concat
@@ -521,11 +542,12 @@ compareDefaults def1 def2 = not . null $ f def1 `intersect` f def2 where
   f def = [Just def, stripQuotes def]
   stripQuotes = stripPrefix "'" >=> fmap reverse . stripPrefix "'" . reverse
 
-defaultPriority, referencePriority, functionPriority, triggerPriority :: Int
-defaultPriority = 0
-referencePriority = 1
-functionPriority = 2
-triggerPriority = 3
+defaultPriority, schemaPriority, referencePriority, functionPriority, triggerPriority :: Int
+defaultPriority = 1
+schemaPriority = 0
+referencePriority = 2
+functionPriority = 3
+triggerPriority = 4
 
 mainTableId :: String
 mainTableId = "id"
@@ -538,9 +560,6 @@ escape s = '`' : s ++ "`"
   
 getStatement :: Utf8 -> MySQL.Query
 getStatement sql = MySQL.Query $ fromUtf8 sql
-
-queryRawTyped' :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => Utf8 -> [DbType] -> [PersistValue] -> (RowPopper (DbPersist MySQL m) -> DbPersist MySQL m a) -> DbPersist MySQL m a
-queryRawTyped' query _ vals f = queryRaw' query vals f
 
 queryRaw' :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => Utf8 -> [PersistValue] -> (RowPopper (DbPersist MySQL m) -> DbPersist MySQL m a) -> DbPersist MySQL m a
 queryRaw' query vals func = do
@@ -630,8 +649,8 @@ getGetter MySQLBase.Enum       = convertPV PersistString
 getGetter other = error $ "MySQL.getGetter: type " ++
                   show other ++ " not supported."
 
-proxy :: Proxy MySQL
-proxy = error "Proxy MySQL"
+proxy :: proxy MySQL
+proxy = error "proxy MySQL"
 
 noLimit :: Utf8
 noLimit = "LIMIT 18446744073709551615"

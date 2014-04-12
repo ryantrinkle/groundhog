@@ -20,10 +20,14 @@ module Database.Groundhog (
   , limitTo
   , offsetBy
   , orderBy
+  , deleteByKey
   -- * Expressions
   , (=.)
   , (&&.), (||.)
   , (==.), (/=.), (<.), (<=.), (>.), (>=.)
+  , isFieldNothing
+  , liftExpr
+  , toArith
   -- * Migration
   , createMigration
   , executeMigration

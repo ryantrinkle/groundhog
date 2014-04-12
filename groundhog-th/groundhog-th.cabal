@@ -1,5 +1,5 @@
 name:            groundhog-th
-version:         0.3.1
+version:         0.4.2.2
 license:         BSD3
 license-file:    LICENSE
 author:          Boris Lykah <lykahb@gmail.com>
@@ -7,18 +7,22 @@ maintainer:      Boris Lykah <lykahb@gmail.com>
 synopsis:        Type-safe datatype-database mapping library.
 description:     This library helps to generate instances for Groundhog datatypes.
 category:        Database
-stability:       Non-stable
+stability:       Stable
 cabal-version:   >= 1.6
 build-type:      Simple
+
+extra-source-files:
+    changelog
 
 library
     build-depends:   base                     >= 4         && < 5
                    , bytestring               >= 0.9
-                   , groundhog                >= 0.3.1     && < 0.4.0
+                   , groundhog                >= 0.4.2.2   && < 0.5.0
                    , template-haskell
                    , time                     >= 1.1.4
                    , containers               >= 0.2
                    , yaml                     >= 0.8.1
+                   , text                     >= 0.8
     exposed-modules: Database.Groundhog.TH
                      Database.Groundhog.TH.Settings
                      Database.Groundhog.TH.CodeGen

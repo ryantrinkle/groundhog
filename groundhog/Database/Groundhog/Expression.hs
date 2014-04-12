@@ -8,7 +8,8 @@
 -- StringField ==. \"abc\" &&. NumberField >. (0 :: Int) ||. MaybeField ==. (Nothing :: Maybe String) ||. MaybeField ==. Just \"def\"
 -- @
 --
--- Note that polymorphic values like numbers or Nothing must have a type annotation
+-- Note that polymorphic values like numbers or Nothing must have a type annotation.
+-- Comparison operators specific for SQL such as IN and LIKE are defined in "Database.Groundhog.Generic.Sql.Functions".
 
 module Database.Groundhog.Expression
   ( Expression(..)
@@ -17,6 +18,9 @@ module Database.Groundhog.Expression
   , (=.)
   , (&&.), (||.)
   , (==.), (/=.), (<.), (<=.), (>.), (>=.)
+  , isFieldNothing
+  , liftExpr
+  , toArith
   ) where
 
 import Database.Groundhog.Core
@@ -27,15 +31,15 @@ class Expression db r a where
   toExpr :: a -> UntypedExpr db r
 
 -- | This helper class can make type signatures more concise
-class (Expression db r a, Unifiable a a') => ExpressionOf db r a a'
+class (Expression db r a, PersistField a') => ExpressionOf db r a a'
 
-instance (Expression db r a, Unifiable a a') => ExpressionOf db r a a'
+instance (Expression db r a, Normalize HTrue a (flag, a'), PersistField a') => ExpressionOf db r a a'
 
 instance PurePersistField a => Expression db r a where
   toExpr = ExprPure
 
 instance (PersistField a, db' ~ db, r' ~ r) => Expression db' r' (Expr db r a) where
-  toExpr = ExprRaw
+  toExpr (Expr e) = e
 
 instance (EntityConstr v c, PersistField a, RestrictionHolder v c ~ r') => Expression db r' (Field v c a) where
   toExpr = ExprField . fieldChain
@@ -49,6 +53,9 @@ instance (EntityConstr v c, RestrictionHolder v c ~ r') => Expression db r' (Aut
 instance (PersistEntity v, IsUniqueKey k, k ~ Key v (Unique u), RestrictionHolder v c ~ r')
       => Expression db r' (u (UniqueMarker v)) where
   toExpr = ExprField . fieldChain
+
+instance (db' ~ db, r' ~ r) => Expression db' r' (Cond db r) where
+  toExpr = ExprCond
 
 -- Let's call "plain type" the types that uniquely define type of a Field it is compared to.
 -- Example: Int -> Field v c Int, but Entity -> Field v c (Entity / Key Entity)
@@ -68,6 +75,8 @@ instance NormalizeValue (Key v (Unique u)) (isPlain, r) => Normalize HFalse (u (
 instance r ~ (HFalse, Key v (Unique u))                 => Normalize HTrue  (u (UniqueMarker v)) r
 instance NormalizeValue (Key v BackendSpecific) (isPlain, r) => Normalize HFalse (AutoKeyField v c) (HFalse, r)
 instance r ~ (HFalse, Key v BackendSpecific)                 => Normalize HTrue  (AutoKeyField v c) r
+instance r ~ (HTrue, Bool) => Normalize HFalse (Cond db r') r
+instance r ~ (HTrue, Bool) => Normalize HTrue  (Cond db r') r
 instance NormalizeValue t r => Normalize HFalse t r
 instance r ~ (HTrue, t)     => Normalize HTrue  t r
 
@@ -135,3 +144,19 @@ a <.  b = Compare Lt (toExpr a) (toExpr b)
 a <=. b = Compare Le (toExpr a) (toExpr b)
 a >.  b = Compare Gt (toExpr a) (toExpr b)
 a >=. b = Compare Ge (toExpr a) (toExpr b)
+
+-- | This function more limited than (==.), but has better type inference.
+-- If you want to compare your value to Nothing with @(==.)@ operator, you have to write the types explicitly @myExpr ==. (Nothing :: Maybe Int)@.
+isFieldNothing :: (Expression db r f, FieldLike f db r (Maybe a), PrimitivePersistField (Maybe a), Unifiable f (Maybe a)) => f -> Cond db r
+isFieldNothing a = a `eq` Nothing where
+  eq :: (Expression db r f, Expression db r a, FieldLike f db r a, Unifiable f a) => f -> a -> Cond db r
+  eq = (==.)
+
+-- | Converts value to 'Expr'. It can help to pass values of different types into functions which expect arguments of the same type, like (+).
+liftExpr :: ExpressionOf db r a a' => a -> Expr db r a'
+liftExpr a = Expr $ toExpr a
+
+{-# DEPRECATED toArith "Please use liftExpr instead" #-}
+-- | It is kept for compatibility with older Groundhog versions and can be replaced with "liftExpr".
+toArith :: ExpressionOf db r a a' => a -> Expr db r a'
+toArith = liftExpr

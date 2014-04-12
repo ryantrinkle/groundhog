@@ -7,6 +7,7 @@ module Database.Groundhog.Generic
     createMigration
   , executeMigration
   , executeMigrationUnsafe
+  , getQueries
   , runMigration
   , runMigrationUnsafe
   , printMigration
@@ -18,6 +19,7 @@ module Database.Groundhog.Generic
   , HasConn
   , runDb
   , runDbConn
+  , runDbConnNoTransaction
   , withSavepoint
   -- * Helper functions for defining *PersistValue instances
   , primToPersistValue
@@ -49,6 +51,7 @@ module Database.Groundhog.Generic
   , mapAllRows
   , phantomDb
   , isSimple
+  , deleteByKey
   ) where
 
 import Database.Groundhog.Core
@@ -66,41 +69,47 @@ import Data.Function (on)
 import Data.List (partition, sortBy)
 import qualified Data.Map as Map
 
-getCorrectMigrations :: NamedMigrations -> [(Bool, Int, String)]
-getCorrectMigrations = either (error.unlines) id . mergeMigrations . Map.elems
-
 -- | Produce the migrations but not execute them. Fails when an unsafe migration occurs.
 createMigration :: PersistBackend m => Migration m -> m NamedMigrations
 createMigration m = liftM snd $ runStateT m Map.empty
 
+-- | Returns either a list of errors in migration or a list of queries
+getQueries :: Bool -- ^ True - support unsafe queries
+             -> SingleMigration -> Either [String] [String]
+getQueries _ (Left errs) = Left errs
+getQueries runUnsafe (Right migs) = (if runUnsafe || null unsafe
+  then Right $ map (\(_, _, query) -> query) migs'
+  else Left $
+    [ "Database migration: manual intervention required."
+    , "The following actions are considered unsafe:"
+    ] ++ map (\(_, _, query) -> query) unsafe) where
+  migs' = sortBy (compare `on` \(_, i, _) -> i) migs
+  unsafe = filter (\(isUnsafe, _, _) -> isUnsafe) migs'
+
+executeMigration' :: (PersistBackend m, MonadIO m) => Bool -> (String -> IO ()) -> NamedMigrations -> m ()
+executeMigration' runUnsafe logger m = do
+  let migs = getQueries runUnsafe $ mergeMigrations $ Map.elems m
+  case migs of
+    Left errs -> fail $ unlines errs
+    Right qs -> mapM_ (executeMigrate logger) qs
+
 -- | Execute the migrations and log them. 
 executeMigration :: (PersistBackend m, MonadIO m) => (String -> IO ()) -> NamedMigrations -> m ()
-executeMigration logger m = do
-  let migs = getCorrectMigrations m
-  let unsafe = filter (\(isUnsafe, _, _) -> isUnsafe) migs
-  if null unsafe
-    then mapM_ (\(_, _, query) -> executeMigrate logger query) $ sortBy (compare `on` \(_, i, _) -> i) migs
-    else error $ concat
-            [ "\n\nDatabase migration: manual intervention required.\n"
-            , "The following actions are considered unsafe:\n\n"
-            , unlines $ map (\(_, _, query) -> "    " ++ query ++ ";") unsafe
-            ]
+executeMigration = executeMigration' False
 
 -- | Execute migrations and log them. Executes the unsafe migrations without warnings
 executeMigrationUnsafe :: (PersistBackend m, MonadIO m) => (String -> IO ()) -> NamedMigrations -> m ()
-executeMigrationUnsafe logger = mapM_ (\(_, _, query) -> executeMigrate logger query) . getCorrectMigrations
+executeMigrationUnsafe = executeMigration' True
 
 -- | Pretty print the migrations
 printMigration :: MonadIO m => NamedMigrations -> m ()
-printMigration migs = liftIO $ do
-  let kv = Map.assocs migs
-  forM_ kv $ \(k, v) -> do
-    putStrLn $ "Datatype " ++ k ++ ":"
-    case v of
-      Left errors -> mapM_ (putStrLn . ("\tError:\t" ++)) errors
-      Right sqls  -> do
-        let showSql (isUnsafe, _, sql) = (if isUnsafe then "Unsafe:\t" else "Safe:\t") ++ sql
-        mapM_ (putStrLn . ("\t" ++) . showSql) sqls
+printMigration migs = liftIO $ forM_ (Map.assocs migs) $ \(k, v) -> do
+  putStrLn $ "Datatype " ++ k ++ ":"
+  case v of
+    Left errors -> mapM_ (putStrLn . ("\tError:\t" ++)) errors
+    Right sqls  -> do
+      let showSql (isUnsafe, _, sql) = (if isUnsafe then "Unsafe:\t" else "Safe:\t") ++ sql
+      mapM_ (putStrLn . ("\t" ++) . showSql) sqls
 
 -- | Run migrations and log them. Fails when an unsafe migration occurs.
 runMigration :: (PersistBackend m, MonadIO m) => (String -> IO ()) -> Migration m -> m ()
@@ -198,10 +207,10 @@ primFromPersistValue :: (PersistBackend m, PrimitivePersistField a) => [PersistV
 primFromPersistValue (x:xs) = phantomDb >>= \p -> return (fromPrimitivePersistValue p x, xs)
 primFromPersistValue xs = (\a -> fail (failMessage a xs) >> return (a, xs)) undefined
 
-primToPurePersistValues :: (DbDescriptor db, PrimitivePersistField a) => Proxy db -> a -> ([PersistValue] -> [PersistValue])
+primToPurePersistValues :: (DbDescriptor db, PrimitivePersistField a) => proxy db -> a -> ([PersistValue] -> [PersistValue])
 primToPurePersistValues p a = (toPrimitivePersistValue p a:)
 
-primFromPurePersistValues :: (DbDescriptor db, PrimitivePersistField a) => Proxy db -> [PersistValue] -> (a, [PersistValue])
+primFromPurePersistValues :: (DbDescriptor db, PrimitivePersistField a) => proxy db -> [PersistValue] -> (a, [PersistValue])
 primFromPurePersistValues p (x:xs) = (fromPrimitivePersistValue p x, xs)
 primFromPurePersistValues _ xs = (\a -> error (failMessage a xs) `asTypeOf` (a, xs)) undefined
 
@@ -278,7 +287,7 @@ mapAllRows :: Monad m => ([PersistValue] -> m a) -> RowPopper m -> m [a]
 mapAllRows f pop = go where
   go = pop >>= maybe (return []) (f >=> \a -> liftM (a:) go)
 
-phantomDb :: PersistBackend m => m (Proxy (PhantomDb m))
+phantomDb :: PersistBackend m => m (proxy (PhantomDb m))
 phantomDb = return $ error "phantomDb"
 
 isSimple :: [ConstructorDef] -> Bool
@@ -297,6 +306,21 @@ runDb f = ask >>= withConn (runDbPersist f)
 runDbConn :: (MonadBaseControl IO m, MonadIO m, ConnectionManager cm conn) => DbPersist conn (NoLoggingT m) a -> cm -> m a
 runDbConn f cm = runNoLoggingT (withConn (runDbPersist f) cm)
 
+-- | It is similar to `runDbConn` but runs action without transaction. It can be useful if you use Groundhog within IO monad or in other cases when you cannot put `PersistBackend` instance into your monad stack.
+--
+-- @
+-- flip withConn cm $ \\conn -> liftIO $ do
+--   -- transaction is already opened by withConn at this point
+--   someIOAction
+--   getValuesFromIO $ \\value -> runDbConnNoTransaction (insert_ value) conn
+-- @
+runDbConnNoTransaction :: (MonadBaseControl IO m, MonadIO m, ConnectionManager cm conn) => DbPersist conn (NoLoggingT m) a -> cm -> m a
+runDbConnNoTransaction f cm = runNoLoggingT (withConnNoTransaction (runDbPersist f) cm)
+
 -- | It helps to run 'withConnSavepoint' within a monad.
 withSavepoint :: (HasConn m cm conn, SingleConnectionManager cm conn, Savepoint conn) => String -> m a -> m a
 withSavepoint name m = ask >>= withConnNoTransaction (withConnSavepoint name m)
+
+{-# DEPRECATED deleteByKey "Use deleteBy instead" #-}
+deleteByKey :: (PersistBackend m, PersistEntity v, PrimitivePersistField (Key v BackendSpecific)) => Key v BackendSpecific -> m ()
+deleteByKey = deleteBy

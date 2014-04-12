@@ -1,6 +1,63 @@
 {-# LANGUAGE GADTs, TypeFamilies, TemplateHaskell, QuasiQuotes, RankNTypes, ScopedTypeVariables, FlexibleContexts, FlexibleInstances, StandaloneDeriving, CPP #-}
+{-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
 
--- ghc --make -fforce-recomp -DWITH_SQLITE -DWITH_POSTGRESQL -DWITH_MYSQL tests.hs
+module GroundhogTest (
+      testSelect
+    , testCond
+    , testArith
+    , testProjectionSql
+    , testNumber
+    , testPersistSettings
+    , testEmbedded
+    , testInsert
+    , testMaybe
+    , testCount
+    , testUpdate
+    , testComparison
+    , testEncoding
+    , testDelete
+    , testDeleteBy
+    , testDeleteAll
+    , testReplaceSingle
+    , testReplaceMulti
+    , testReplaceBy
+    , testTuple
+    , testTupleList
+    , testMigrateAddColumnSingle
+    , testMigrateAddUniqueConstraint
+    , testMigrateDropUniqueConstraint
+    , testMigrateAddUniqueIndex
+    , testMigrateDropUniqueIndex
+    , testMigrateAddDropNotNull
+    , testMigrateAddConstructorToMany
+    , testMigrateChangeType
+    , testLongNames
+    , testReference
+    , testMaybeReference
+    , testUniqueKey
+    , testForeignKeyUnique
+    , testProjection
+    , testKeyNormalization
+    , testAutoKeyField
+    , testTime
+    , testPrimitiveData
+    , testMigrateOrphanConstructors
+    , testSchemas
+    , testFloating
+    , testListTriggersOnDelete
+    , testListTriggersOnUpdate
+#if WITH_SQLITE
+    , testSchemaAnalysisSqlite
+#endif
+#if WITH_POSTGRESQL
+    , testSchemaAnalysisPostgresql
+    , testGeometry
+    , testArrays
+#endif
+#if WITH_MYSQL
+    , testSchemaAnalysisMySQL
+#endif
+) where
 
 import qualified Control.Exception as E
 import Control.Exception.Base (SomeException)
@@ -22,7 +79,7 @@ import Database.Groundhog.Sqlite
 import Database.Groundhog.Postgresql
 import Database.Groundhog.Postgresql.Array hiding (all, any, append)
 import qualified Database.Groundhog.Postgresql.Array as Arr
-import Database.Groundhog.Postgresql.Geometry
+import Database.Groundhog.Postgresql.Geometry hiding ((>>))
 #endif
 #if WITH_MYSQL
 import Database.Groundhog.MySQL
@@ -31,6 +88,7 @@ import Data.ByteString.Char8 (unpack)
 import Data.Int
 import Data.List (intercalate, isInfixOf, sort)
 import qualified Data.Map as Map
+import qualified Data.String.Utils as Utils
 import qualified Data.Time as Time
 import qualified Data.Time.Clock.POSIX as Time
 import qualified Data.Traversable as T
@@ -49,9 +107,12 @@ data Multi a = First {first :: Int} | Second {second :: a} deriving (Eq, Show)
 data Settable = Settable {settable1 :: String, settable2 :: Maybe (Key (Single String) BackendSpecific), settableTuple :: (Int, (String, Maybe Int64))}
 data Keys = Keys {refDirect :: Single String, refKey :: DefaultKey (Single String), refDirectMaybe :: Maybe (Single String), refKeyMaybe :: Maybe (DefaultKey (Single String))}
 data EmbeddedSample = EmbeddedSample {embedded1 :: String, embedded2 :: (Int, Int)} deriving (Eq, Show)
-data UniqueKeySample = UniqueKeySample { uniqueKey1 :: Int, uniqueKey2 :: Int, uniqueKey3 :: Int } deriving (Eq, Show)
+data UniqueKeySample = UniqueKeySample { uniqueKey1 :: Int, uniqueKey2 :: Int, uniqueKey3 :: Maybe Int } deriving (Eq, Show)
 data InCurrentSchema = InCurrentSchema { inCurrentSchema :: Maybe (Key InAnotherSchema BackendSpecific) }
 data InAnotherSchema = InAnotherSchema { inAnotherSchema :: Maybe (Key InCurrentSchema BackendSpecific) }
+data EnumTest = Enum1 | Enum2 | Enum3 deriving (Eq, Show, Enum)
+data ShowRead = ShowRead String Int deriving (Eq, Show, Read)
+
 
 -- cannot use ordinary deriving because it runs before mkPersist and requires (Single String) to be an instance of PersistEntity
 deriving instance Eq Keys
@@ -126,6 +187,10 @@ mkPersist defaultCodegenConfig [groundhog|
 - entity: InCurrentSchema
 - entity: InAnotherSchema
   schema: myschema
+- primitive: EnumTest
+  representation: enum
+- primitive: ShowRead
+  representation: showread # by default
 |]
 
 data HoldsUniqueKey = HoldsUniqueKey { foreignUniqueKey :: Key UniqueKeySample (Unique Unique_key_one_column) } deriving (Eq, Show)
@@ -141,114 +206,11 @@ mkPersist defaultCodegenConfig [groundhog|
         fields: [foreignUniqueKey]
 |]
 
-main :: IO ()
-main = do
-#if WITH_POSTGRESQL
-  let postgresql = [testGroup "Database.Groundhog.Postgresql" $ concatMap ($ runPSQL) [mkTestSuite, mkSqlTestSuite, postgresqlTestSuite]]
-      runPSQL m = withPostgresqlConn "dbname=test user=test password=test host=localhost" . runDbConn $ cleanPostgresql >> m
-#else
-  let postgresql = []
-#endif
-#if WITH_SQLITE
-  let sqlite = [testGroup "Database.Groundhog.Sqlite" $ concatMap ($ runSqlite) [mkTestSuite, mkSqlTestSuite, sqliteTestSuite]]
-      runSqlite m = withSqliteConn ":memory:" . runDbConn $ m
-#else
-  let sqlite = []
-#endif
-#if WITH_MYSQL
-  let mysql = [testGroup "Database.Groundhog.MySQL" $ concatMap ($ runMySQL) [mkTestSuite, mkSqlTestSuite, mysqlTestSuite]]
-      mySQLConnInfo = defaultConnectInfo
-                        { connectHost     = "localhost"
-                        , connectUser     = "test"
-                        , connectPassword = "test"
-                        , connectDatabase = "test"
-                        }
-      runMySQL m = withMySQLConn mySQLConnInfo . runDbConn $ cleanMySQL >> m
-#else
-  let mysql = []
-#endif
-  defaultMain $ mysql ++ sqlite ++ postgresql
-
 migr :: (PersistEntity v, PersistBackend m, MonadBaseControl IO m, MonadIO m) => v -> m ()
 migr v = do
   runMigration silentMigrationLogger (migrate v)
   m <- createMigration $ migrate v
   [] @=? filter (/= Right []) (Map.elems m)
-
-mkSqlTestSuite :: (PersistBackend m, MonadBaseControl IO m, MonadIO m, db ~ PhantomDb m, SqlDb db, QueryRaw db ~ Snippet db) => (m () -> IO ()) -> [Test]
-mkSqlTestSuite run =
-  [ testCase "testSelect" $ run testSelect
-  , testCase "testCond" $ run testCond
-  , testCase "testProjectionSql" $ run testProjectionSql
-  ]
-
-mkTestSuite :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => (m () -> IO ()) -> [Test]
-mkTestSuite run =
-  [ testCase "testNumber" $ run testNumber
-  , testCase "testPersistSettings" $ run testPersistSettings
-  , testCase "testEmbedded" $ run testEmbedded
-  , testCase "testInsert" $ run testInsert
-  , testCase "testMaybe" $ run testMaybe
-  , testCase "testCount" $ run testCount
-  , testCase "testUpdate" $ run testUpdate
-  , testCase "testComparison" $ run testComparison
-  , testCase "testEncoding" $ run testEncoding
-  , testCase "testDelete" $ run testDelete
-  , testCase "testDeleteByKey" $ run testDeleteByKey
-  , testCase "testReplaceSingle" $ run testReplaceSingle
-  , testCase "testReplaceMulti" $ run testReplaceMulti
-  , testCase "testTuple" $ run testTuple
-  , testCase "testTupleList" $ run testTupleList
-  , testCase "testMigrateAddColumnSingle" $ run testMigrateAddColumnSingle
-  , testCase "testMigrateAddUniqueConstraint" $ run testMigrateAddUniqueConstraint
-  , testCase "testMigrateDropUniqueConstraint" $ run testMigrateDropUniqueConstraint
-  , testCase "testMigrateAddUniqueIndex" $ run testMigrateAddUniqueIndex
-  , testCase "testMigrateDropUniqueIndex" $ run testMigrateDropUniqueIndex
-  , testCase "testMigrateAddDropNotNull" $ run testMigrateAddDropNotNull
-  , testCase "testMigrateAddConstructorToMany" $ run testMigrateAddConstructorToMany
-  , testCase "testMigrateChangeType" $ run testMigrateChangeType
-  , testCase "testLongNames" $ run testLongNames
-  , testCase "testReference" $ run testReference
-  , testCase "testMaybeReference" $ run testMaybeReference
-  , testCase "testUniqueKey" $ run testUniqueKey
-  , testCase "testForeignKeyUnique" $ run testForeignKeyUnique
-  , testCase "testProjection" $ run testProjection
-  , testCase "testKeyNormalization" $ run testKeyNormalization
-  , testCase "testAutoKeyField" $ run testAutoKeyField
-  , testCase "testTime" $ run testTime
-  ]
-
-#if WITH_SQLITE
-sqliteTestSuite :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => (DbPersist Sqlite m () -> IO ()) -> [Test]
-sqliteTestSuite run = 
-  [ testCase "testMigrateOrphanConstructors" $ run testMigrateOrphanConstructors
-  , testCase "testSchemaAnalysisSqlite" $ run testSchemaAnalysisSqlite
-  , testCase "testListTriggersOnDelete" $ run testListTriggersOnDelete
-  , testCase "testListTriggersOnUpdate" $ run testListTriggersOnUpdate
-  ]
-#endif
-
-#if WITH_POSTGRESQL
-postgresqlTestSuite :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => (DbPersist Postgresql m () -> IO ()) -> [Test]
-postgresqlTestSuite run =
-  [ testCase "testGeometry" $ run testGeometry
-  , testCase "testArrays" $ run testArrays
-  , testCase "testSchemas" $ run testSchemas
-  , testCase "testSchemaAnalysisPostgresql" $ run testSchemaAnalysisPostgresql
-  , testCase "testListTriggersOnDelete" $ run testListTriggersOnDelete
-  , testCase "testListTriggersOnUpdate" $ run testListTriggersOnUpdate
-  ]
-#endif
-
-#if WITH_MYSQL
-mysqlTestSuite :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => (DbPersist MySQL m () -> IO ()) -> [Test]
-mysqlTestSuite run =
-  [ testCase "testSchemas" $ run testSchemas
-  , testCase "testSchemaAnalysisMySQL" $ run testSchemaAnalysisMySQL
---  , testCase "testListTriggersOnDelete" $ run testListTriggersOnDelete  -- fails due to MySQL bug #11472
---  , testCase "testListTriggersOnUpdate" $ run testListTriggersOnUpdate  -- fails due to MySQL bug #11472
-  ]
-#endif
 
 (@=?) :: (Eq a, Show a, MonadBaseControl IO m, MonadIO m) => a -> a -> m ()
 expected @=? actual = liftIO $ expected H.@=? actual
@@ -277,7 +239,7 @@ testPersistSettings = do
   migr val
   singleKey <- insert val
   let settable = Settable "abc" (Just singleKey) (1, ("qqq", Nothing))
-  m <- fmap (Map.lookup "sqlsettable") $ createMigration $ migrate settable
+  m <- fmap (Map.lookup "entity sqlsettable") $ createMigration $ migrate settable
   let queries = case m of
         Just (Right qs) -> intercalate ";" $ map (\(_, _, q) -> q) qs
         t -> fail $ "Unexpected migration result: " ++ show m
@@ -292,7 +254,7 @@ testPersistSettings = do
   Just settable @=?? get k
   vals <- select $ Settable1Fld ==. "abc" &&. SettableTupleField ~> Tuple2_0Selector ==. (1 :: Int) &&. SettableTupleField ~> Tuple2_1Selector ~> Tuple2_0Selector ==. "qqq"
   [settable] @=? vals
-  deleteByKey singleKey -- test on delete cascade
+  deleteBy singleKey -- test on delete cascade
   Nothing @=?? get k
   assertExc "Uniqueness constraint not enforced" $ insert settable >> insert settable
 
@@ -331,9 +293,7 @@ testMaybe :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testMaybe = do
   let val = Single (Just "abc")
   migr val
-  k <- insert val
-  val' <- get k
-  Just val @=? val'
+  Just val @=?? (insert val >>= get)
 
 testSelect :: (PersistBackend m, MonadBaseControl IO m, MonadIO m, db ~ PhantomDb m, SqlDb db, QueryRaw db ~ Snippet db) => m ()
 testSelect = do
@@ -350,7 +310,7 @@ testSelect = do
   [val2] @=? vals2
   vals3 <- select $ (SingleField >=. (6 :: Int, "something") &&. SingleField ~> Tuple2_1Selector <. "ghc") `limitTo` 1
   [val2] @=? vals3
-  vals4 <- select $ toArith (SingleField ~> Tuple2_0Selector) + 1 >. (10 :: Int)
+  vals4 <- select $ liftExpr (SingleField ~> Tuple2_0Selector) + 1 >. (10 :: Int)
   [val3] @=? vals4
   vals5 <- select $ (SingleField ~> Tuple2_1Selector) `like` "%E%"
   [val2] @=? vals5
@@ -359,43 +319,59 @@ testSelect = do
   vals7 <- select $ ((SingleField ~> Tuple2_0Selector) `in_` [7 :: Int, 5]) `orderBy` [Asc (SingleField ~> Tuple2_0Selector)]
   [val1, val2] @=? vals7
 
+testArith :: (PersistBackend m, MonadBaseControl IO m, MonadIO m, db ~ PhantomDb m, SqlDb db, QueryRaw db ~ Snippet db) => m ()
+testArith = do
+  let val = Single (1 :: Int)
+  migr val
+  k <- insert val
+  [(4, -4, 4)] @=?? project ((liftExpr SingleField + 1) * 2, liftExpr SingleField - 5, abs $ liftExpr SingleField - 5) (AutoKeyField ==. k)
+  [(1, 0, -1)] @=?? project (signum $ liftExpr SingleField, signum $ liftExpr SingleField - 1, signum $ liftExpr SingleField - 10) (AutoKeyField ==. k)
+  [(-6, -1)] @=?? project (quotRem (liftExpr SingleField - 20) 3) (AutoKeyField ==. k)
+  [(-7, 2)] @=?? project (divMod (liftExpr SingleField - 20) 3) (AutoKeyField ==. k)
+
 testCond :: forall m db . (PersistBackend m, MonadBaseControl IO m, MonadIO m, db ~ PhantomDb m, SqlDb db, QueryRaw db ~ Snippet db) => m ()
 testCond = do
   proxy <- phantomDb
   let rend :: forall r . Cond (PhantomDb m) r -> Maybe (RenderS (PhantomDb m) r)
-      rend = renderCond id (\a b -> a <> fromString "=" <> b) (\a b -> a <> fromString "<>" <> b)
+      rend = renderCond $ RenderConfig id
   let (===) :: forall r a. (PrimitivePersistField a) => (String, [a]) -> Cond (PhantomDb m) r -> m ()
-      (query, vals) === cond = let Just (RenderS q v) = rend cond in (query, map (toPrimitivePersistValue proxy) vals) @=? (unpack $ fromUtf8 $ q, v [])
+      (query, vals) === cond = let
+            Just (RenderS q v) = rend cond
+            equals = case backendName proxy of
+               "sqlite" -> " IS "
+               "postgresql" -> " IS NOT DISTINCT FROM "
+               "mysql" -> "<=>"
+               _ -> "="
+            query' = Utils.replace "=" equals query
+         in (query', map (toPrimitivePersistValue proxy) vals) @=? (unpack $ fromUtf8 $ q, v [])
 
   let intField f = f `asTypeOf` (undefined :: Field (Single (Int, Int)) c a)
       intNum = fromInteger :: Integer -> Expr db r Int
   -- should cover all cases of renderCond comparison rendering
-  ("int=?", [4 :: Int]) === (IntField ==. (4 :: Int))
-  ("int=int", [] :: [Int]) === (IntField ==. IntField)
-  ("int=(int+?)*?", [1, 2 :: Int]) === (IntField ==. (toArith IntField + 1) * 2)
-
   ("single#val0=? AND single#val1=?", ["abc", "def"]) === (SingleField ==. ("abc", "def"))
   ("single#val0=single#val1", [] :: [Int]) === (intField SingleField ~> Tuple2_0Selector ==. SingleField ~> Tuple2_1Selector)
-  ("single#val1=single#val0*(?+single#val0)", [5 :: Int]) === (intField SingleField ~> Tuple2_1Selector ==. toArith (SingleField ~> Tuple2_0Selector) * (5 + toArith (SingleField ~> Tuple2_0Selector)))
+  ("single#val1=single#val0*(?+single#val0)", [5 :: Int]) === (intField SingleField ~> Tuple2_1Selector ==. liftExpr (SingleField ~> Tuple2_0Selector) * (5 + liftExpr (SingleField ~> Tuple2_0Selector)))
 
   ("?=? AND ?=?", [1, 2, 3, 4 :: Int]) === ((1 :: Int, 3 :: Int) ==. (2 :: Int, 4 :: Int) &&. SingleField ==. ()) -- SingleField ==. () is required to replace Any with a PersistEntity instance
   ("?<? OR ?<?", [1, 2, 3, 4 :: Int]) === ((1 :: Int, 3 :: Int) <. (2 :: Int, 4 :: Int) &&. SingleField ==. ())
   ("?=single#val0 AND ?=single#val1", [1, 2 :: Int]) === ((1 :: Int, 2 :: Int) ==. SingleField)
-  ("?=single+?*?", [1, 2, 3 :: Int]) === ((1 :: Int) ==. toArith SingleField + 2 * 3)
+  ("?=single+?*?", [1, 2, 3 :: Int]) === ((1 :: Int) ==. liftExpr SingleField + 2 * 3)
 
---  ("?-single=?", [1, 2 :: Int]) === (1 - toArith SingleField ==. (2 :: Int))
-  ("?*single>=single", [1 :: Int]) === (intNum 1 * toArith SingleField >=. SingleField)
---  ("?+single>=single-?", [1, 2 :: Int]) === (intNum 1 + toArith SingleField >=. toArith SingleField - 2)
+--  ("?-single=?", [1, 2 :: Int]) === (1 - liftExpr SingleField ==. (2 :: Int))
+  ("?*single>single", [1 :: Int]) === (intNum 1 * liftExpr SingleField >. SingleField)
+--  ("?+single>=single-?", [1, 2 :: Int]) === (intNum 1 + liftExpr SingleField >=. liftExpr SingleField - 2)
   
   -- test parentheses
   ("NOT (NOT single=? OR ?=? AND ?=?)", [0, 1, 2, 3, 4 :: Int]) === (Not $ Not (SingleField ==. (0 :: Int)) ||. (1 :: Int, 3 :: Int) ==. (2 :: Int, 4 :: Int))
   ("single=? AND (?<? OR ?<?)", [0, 1, 2, 3, 4 :: Int]) === (SingleField ==. (0 :: Int) &&. (1 :: Int, 3 :: Int) <. (2 :: Int, 4 :: Int))
-  ("NOT (single=? AND (single=single OR single<>single))", [0 :: Int]) === (Not $ SingleField ==. (0 :: Int) &&. (SingleField ==. SingleField ||. SingleField /=. SingleField))
+  ("NOT (single=? AND (single=single OR single<single))", [0 :: Int]) === (Not $ SingleField ==. (0 :: Int) &&. (SingleField ==. SingleField ||. SingleField <. SingleField))
   
   -- test empty conditions
   ("single#val0=? AND single#val1=?", ["abc", "def"]) === (SingleField ==. ("abc", "def") &&. (() ==. () ||. ((), ()) <. ((), ())))
   ("single#val0=? AND single#val1=?", ["abc", "def"]) === ((() ==. () ||. ((), ()) <. ((), ())) &&. SingleField ==. ("abc", "def"))
-  
+
+  -- test conditions used as expressions
+  ("(?=?)=(?=?)", [1, 1, 0, 0 :: Int]) === (((1 :: Int) ==. (1 :: Int)) ==. ((0 :: Int) ==. (0 :: Int)))
 
 testCount :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testCount = do
@@ -476,7 +452,7 @@ testListTriggersOnDelete = do
   k <- insert (Single ("", [["abc", "def"]]) :: Single (String, [[String]]))
   Just [listKey] <- queryRaw' "select \"single#val1\" from \"Single#Tuple2##String#List##List##String\" where id=?" [toPrimitivePersistValue proxy k] firstRow
   listsInsideListKeys <- queryRaw' "select value from \"List##List##String#values\" where id=?" [listKey] $ mapAllRows return
-  deleteByKey k
+  deleteBy k
   -- test if the main list table and the associated values were deleted
   listMain <- queryRaw' "select * from \"List##List##String\" where id=?" [listKey] firstRow
   Nothing @=? listMain
@@ -515,20 +491,30 @@ testDelete = do
   Nothing @=?? queryRaw' "SELECT * FROM \"Multi#String\" WHERE id=?" [toPrimitivePersistValue proxy k] firstRow
   Nothing @=?? queryRaw' "SELECT * FROM \"Multi#String#Second\" WHERE id=?" [toPrimitivePersistValue proxy k] firstRow
 
-testDeleteByKey :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
-testDeleteByKey = do
+testDeleteBy :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
+testDeleteBy = do
   migr (undefined :: Multi String)
   proxy <- phantomDb
   k <- insert $ Second "abc"
-  deleteByKey k
+  deleteBy k
   Nothing @=?? queryRaw' "SELECT * FROM \"Multi#String\" WHERE id=?" [toPrimitivePersistValue proxy k] firstRow
   Nothing @=?? queryRaw' "SELECT * FROM \"Multi#String#Second\" WHERE id=?" [toPrimitivePersistValue proxy k] firstRow
+
+testDeleteAll :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
+testDeleteAll = do
+  let val = Second "abc"
+  migr val
+  proxy <- phantomDb
+  insert val
+  deleteAll val
+  Nothing @=?? queryRaw' "SELECT * FROM \"Multi#String\"" [] firstRow
+  Nothing @=?? queryRaw' "SELECT * FROM \"Multi#String#Second\"" [] firstRow
 
 testReplaceMulti :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testReplaceMulti = do
   migr (undefined :: Single (Multi String))
   proxy <- phantomDb
-  -- we need Single to test that referenced value cam be replaced
+  -- we need Single to test that referenced value can be replaced
   k <- insert $ Single (Second "abc")
   Just [valueKey'] <- queryRaw' "SELECT \"single\" FROM \"Single#Multi#String\" WHERE id=?" [toPrimitivePersistValue proxy k] firstRow
   let valueKey = fromPrimitivePersistValue proxy valueKey'
@@ -545,7 +531,7 @@ testReplaceMulti = do
 
 testReplaceSingle :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testReplaceSingle = do
-  -- we need Single to test that referenced value cam be replaced
+  -- we need Single to test that referenced value can be replaced
   let val = Single (Single "abc")
   migr val
   proxy <- phantomDb
@@ -555,6 +541,15 @@ testReplaceSingle = do
   replace valueKey (Single "def")
   replaced <- get valueKey
   Just (Single "def") @=? replaced
+
+testReplaceBy :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
+testReplaceBy = do
+  let val = UniqueKeySample 1 2 (Just 3)
+      replaced = UniqueKeySample 1 3 Nothing
+  migr val
+  k <- insert val
+  replaceBy Unique_key_one_column replaced
+  Just replaced @=?? getBy (Unique_key_one_columnKey 1)
 
 testMigrateAddColumnSingle :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testMigrateAddColumnSingle = do
@@ -607,7 +602,7 @@ testMigrateAddDropNotNull = do
   migr (undefined :: New.AddNotNull)
   k <- insert val2
   migr (undefined :: Old.AddNotNull)
-  insert val >>= deleteByKey
+  insert val >>= deleteBy
   migr (undefined :: New.AddNotNull)
   val2' <- get k
   Just val2 @=? val2'
@@ -640,9 +635,7 @@ testLongNames :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testLongNames = do
   let val = Single [(Single [Single ""], 0 :: Int, [""], (), [""])]
   migr val
-  k <- insert val
-  val' <- get k
-  Just val @=? val'
+  Just val @=?? (insert val >>= get)
 
   let val2 = Single [([""], Single "", 0 :: Int)]
   migr val2
@@ -656,29 +649,35 @@ testReference = do
   migr (undefined :: Single (Key (Single String) BackendSpecific))
   k <- insert $ Single "abc"
   insert $ Single k
-  assertExc "Foreign key must prevent deletion" $ deleteByKey k
+  assertExc "Foreign key must prevent deletion" $ deleteBy k
 
 testMaybeReference :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testMaybeReference = do
   migr (undefined :: Single (Maybe (Key (Single String) BackendSpecific)))
   k <- insert $ Single "abc"
   insert $ Single $ Just k
-  assertExc "Foreign key must prevent deletion" $ deleteByKey k
+  assertExc "Foreign key must prevent deletion" $ deleteBy k
 
 testUniqueKey :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testUniqueKey = do
-  let uVal = UniqueKeySample 1 2 3
+  let uVal = UniqueKeySample 1 2 (Just 3)
+  let uKey = Unique_key_two_columnsKey 2 (Just 3)
   let val = Single uVal
   migr val
   k <- insert val
-  val1 <- get k
-  Just val @=? val1
-  val2 <- select (Unique_key_two_columns ==. Unique_key_two_columnsKey 2 3)
-  [uVal] @=? val2
+  Just val @=?? get k
+  [uVal] @=?? select (Unique_key_two_columns ==. uKey)
+  Left () @=?? insertByAll uVal
+  -- check that constraints with nulls can be repeated
+  insert $ UniqueKeySample 2 2 Nothing
+  insert $ UniqueKeySample 3 2 Nothing
+  insertByAll $ UniqueKeySample 4 2 Nothing
+  3 @=?? count (Unique_key_two_columns ==. Unique_key_two_columnsKey 2 Nothing)
+  return ()
 
 testForeignKeyUnique :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testForeignKeyUnique = do
-  let uVal = UniqueKeySample 1 2 3
+  let uVal = UniqueKeySample 1 2 (Just 3)
   let val = HoldsUniqueKey (extractUnique uVal)
   migr val
   insert uVal
@@ -690,9 +689,9 @@ testProjection = do
   let val = Single ("abc", 5 :: Int)
   migr val
   k <- insert val
-  result <- project (AutoKeyField, SingleConstructor, SingleField, SingleField ~> Tuple2_1Selector) ("" ==. "")
-  [(k, val, ("abc", 5 :: Int), 5 :: Int)] @=? result
-  let uVal = UniqueKeySample 1 2 3
+  result <- project (AutoKeyField, SingleConstructor, SingleField, SingleField ~> Tuple2_1Selector, SingleField ==. SingleField) ("" ==. "")
+  [(k, val, ("abc", 5 :: Int), 5 :: Int, True)] @=? result
+  let uVal = UniqueKeySample 1 2 (Just 3)
   migr uVal
   insert uVal
   result2 <- project Unique_key_two_columns ("" ==. "")
@@ -702,8 +701,8 @@ testProjectionSql :: (PersistBackend m, MonadBaseControl IO m, MonadIO m, db ~ P
 testProjectionSql = do
   let val = Single ("abc", 5 :: Int)
   migr val
-  k <- insert val
-  result <- project ("hello " `append` (upper $ SingleField ~> Tuple2_0Selector), toArith (SingleField ~> Tuple2_1Selector) + 1) (() ==. ())
+  insert val
+  result <- project ("hello " `append` (upper $ SingleField ~> Tuple2_0Selector), liftExpr (SingleField ~> Tuple2_1Selector) + 1) (() ==. ())
   [("hello ABC", 6 :: Int)] @=? result
 
 testKeyNormalization :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
@@ -750,6 +749,12 @@ testTime = do
   val' <- get k
   Just val @=? val'
 
+testPrimitiveData :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
+testPrimitiveData = do
+  let val = Single (Enum2, ShowRead "abc" 42)
+  migr val
+  Just val @=?? (insert val >>= get)
+
 testSchemas :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => m ()
 testSchemas = do
   let val = InCurrentSchema Nothing
@@ -757,6 +762,36 @@ testSchemas = do
   k <- insert val
   let val2 = InAnotherSchema (Just k)
   Just val2 @=?? (insert val2 >>= get)
+
+testFloating :: (PersistBackend m, MonadBaseControl IO m, MonadIO m, db ~ PhantomDb m, QueryRaw db ~ Snippet db, FloatingSqlDb db) => m ()
+testFloating = do
+  let val = Single (pi :: Double)
+  migr val
+  k <- insert val
+  let expected @=??~ expr = do
+        actual <- fmap head $ project expr $ AutoKeyField ==. k
+        liftIO $ unless (abs (expected - actual) < 0.0001) $ expected @=? actual
+  180 @=??~ degrees SingleField
+  pi  @=??~ radians (degrees SingleField)
+  0   @=??~ sin (liftExpr SingleField)
+  (-1)@=??~ cos (liftExpr SingleField)
+  1   @=??~ tan (liftExpr SingleField / 4)
+  0   @=??~ cot (liftExpr SingleField / 2)
+  (pi/2) @=??~ asin (sin $ liftExpr SingleField / 2)
+  pi  @=??~ acos (cos $ liftExpr SingleField)
+  exp 2   @=??~ exp 2
+  sqrt pi @=??~ sqrt (liftExpr SingleField)
+  exp pi @=??~ exp (liftExpr SingleField)
+  (pi ** 2) @=??~ (liftExpr SingleField ** 2)
+  log pi @=??~ log (liftExpr SingleField)
+  logBase 3 pi @=??~ logBase 3 (liftExpr SingleField)
+
+  sinh pi @=??~ sinh (liftExpr SingleField)
+  tanh pi @=??~ tanh (liftExpr SingleField)
+  cosh pi @=??~ cosh (liftExpr SingleField)
+  asinh pi @=??~ asinh (liftExpr SingleField)
+  atanh (pi / 4) @=??~ atanh (liftExpr SingleField / 4)
+  acosh (pi) @=??~ acosh (liftExpr SingleField)
 
 #if WITH_SQLITE
 testSchemaAnalysisSqlite :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => DbPersist Sqlite m ()
@@ -804,9 +839,9 @@ testArrays = do
       int = id
   [2] @=?? project (SingleField ! int 2) (AutoKeyField ==. k)
   [Array [2, 3]] @=?? project (SingleField !: (int 2, int 3)) (AutoKeyField ==. k)
-  [Array [1..4]] @=?? project (SingleField `Arr.append` int 4) (AutoKeyField ==. k)
-  [Array [0..3]] @=?? project (int 0 `Arr.prepend` SingleField) (AutoKeyField ==. k)
-  [Array [1..6]] @=?? project (SingleField `arrayCat` Array [int 4..6]) (AutoKeyField ==. k)
+  [Array [1..4]] @=?? project (SingleField `Arr.append` explicitType (int 4)) (AutoKeyField ==. k)
+  [Array [0..3]] @=?? project (explicitType (int 0) `Arr.prepend` SingleField) (AutoKeyField ==. k)
+  [Array [1..6]] @=?? project (SingleField `arrayCat` explicitType (Array [int 4..6])) (AutoKeyField ==. k)
   ["[1:3]"] @=?? project (arrayDims SingleField) (AutoKeyField ==. k)
   [1] @=?? project (arrayNDims SingleField) (AutoKeyField ==. k)
   [1] @=?? project (arrayLower SingleField 1) (AutoKeyField ==. k)
@@ -817,9 +852,9 @@ testArrays = do
   [] @=?? project AutoKeyField (AutoKeyField ==. k &&. Arr.any (int 0) SingleField)
   [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. Arr.all (int 2) (SingleField !: (int 2, int 2)))
   [] @=?? project AutoKeyField (AutoKeyField ==. k &&. Arr.all (int 2) SingleField)
-  [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. SingleField @> Array [int 2, 1])
-  [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. Array [int 2, 1] <@ SingleField)
-  [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. Array [int 3..10] `overlaps` SingleField)
+  [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. SingleField Arr.@> explicitType (Array [int 2, 1]))
+  [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. explicitType (Array [int 2, 1]) Arr.<@ SingleField)
+  [k] @=?? project AutoKeyField (AutoKeyField ==. k &&. explicitType (Array [int 3..10]) `overlaps` SingleField)
   -- test escaping/unescaping
   let myString = ['\1'..'\255'] :: String
   let val2 = Single (Array[myString], Array[Array[myString]])
@@ -841,12 +876,6 @@ testSchemaAnalysisPostgresql = do
   funcSql <- analyzeFunction Nothing "myFunction"
   let funcSql' = maybe (error "No function found") id funcSql
   liftIO $ "RETURN NEW;" `isInfixOf` funcSql' H.@? "Function does not contain action statement"
-
-cleanPostgresql :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => DbPersist Postgresql m ()
-cleanPostgresql = forM_ ["public", "myschema"] $ \schema -> do
-  executeRaw True ("drop schema if exists " ++ schema ++ " cascade") []
-  executeRaw True ("create schema " ++ schema) []
-  executeRaw True ("alter schema " ++ schema ++ " owner to test") []
 #endif
 
 #if WITH_MYSQL
@@ -865,23 +894,14 @@ testSchemaAnalysisMySQL = do
   funcSql <- analyzeFunction Nothing "myfunc"
   let funcSql' = maybe (error "No function found") id funcSql
   liftIO $ "RETURN 42" `isInfixOf` funcSql' H.@? "Function does not contain action statement"
-
-cleanMySQL :: (MonadBaseControl IO m, MonadIO m, MonadLogger m) => DbPersist MySQL m ()
-cleanMySQL = do
-  executeRaw True "SET FOREIGN_KEY_CHECKS = 0" []
-  forM_ ["test", "myschema"] $ \schema -> do
-    executeRaw True ("drop database if exists " ++ schema) []
-    executeRaw True ("create database " ++ schema) []
-  executeRaw True ("use test") []
-  executeRaw True "SET FOREIGN_KEY_CHECKS = 1" []
 #endif
 
 assertExc :: (PersistBackend m, MonadBaseControl IO m, MonadIO m) => String -> m a -> m ()
 assertExc err m = do
-  happened <- control $ \runInIO -> E.catch (runInIO $ m >> return False) (\(e :: SomeException) -> runInIO $ return True)
+  happened <- control $ \runInIO -> E.catch (runInIO $ m >> return False) (\(_ :: SomeException) -> runInIO $ return True)
   unless happened $ liftIO (H.assertFailure err)
 
-reescape :: DbDescriptor db => Proxy db -> String -> String
+reescape :: DbDescriptor db => proxy db -> String -> String
 reescape proxy query = if backendName proxy == "mysql"
   then map (\c -> if c == '"' then '`' else c) query
   else query

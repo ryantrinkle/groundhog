@@ -27,12 +27,13 @@ import Database.Groundhog.TH.Settings
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (StrictType, VarStrictType, Lift(..))
 import Language.Haskell.TH.Quote
+import Control.Applicative ((<$>))
 import Control.Monad (forM, forM_, when, unless, liftM2)
-import Data.ByteString.Char8 (pack)
 import Data.Char (isUpper, isLower, isSpace, isDigit, toUpper, toLower)
-import Data.Either (lefts)
 import Data.List (nub, (\\))
-import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing)
+import Data.String
+import Data.Text.Encoding (encodeUtf8)
 import Data.Yaml as Y(decodeHelper, ParseException(..))
 import qualified Text.Libyaml as Y
 
@@ -178,22 +179,32 @@ lowerCaseSuffixNamingStyle = suffixNamingStyle {
 -- The datatypes and their generation options are defined via YAML configuration parsed by quasiquoter 'groundhog'. 
 mkPersist :: CodegenConfig -> PersistDefinitions -> Q [Dec]
 mkPersist CodegenConfig{..} (PersistDefinitions defs) = do
-  let duplicates = notUniqueBy id $ map (either psDataName psEmbeddedName) defs
+  let duplicates = notUniqueBy id $ flip map defs $ \a -> case a of
+        PSEntityDef'    e -> psDataName e
+        PSEmbeddedDef'  e -> psEmbeddedName e
+        PSPrimitiveDef' e -> psPrimitiveName e
   unless (null duplicates) $ fail $ "All definitions must be unique. Found duplicates: " ++ show duplicates
-  defs' <- forM defs $ \def -> do
-    let name = mkName $ either psDataName psEmbeddedName def
-    info <- reify name
-    return $ case info of
-      TyConI x -> case x of
-        d@DataD{}  -> case def of
-          Left  ent -> either error Left $ validateEntity $ applyEntitySettings namingStyle ent $ mkTHEntityDefWith namingStyle d
-          Right emb -> either error Right $ validateEmbedded $ applyEmbeddedSettings emb $ mkTHEmbeddedDefWith namingStyle d
-        NewtypeD{} -> error "Newtypes are not supported"
-        _ -> error $ "Unknown declaration type: " ++ show name ++ " " ++ show x
-      _        -> error $ "Only datatypes can be processed: " ++ show name
-  decs <- mapM (either mkEntityDecs mkEmbeddedDecs) defs'
-  migrateFunc <- maybe (return []) (\name -> mkMigrateFunction name (lefts defs')) migrationFunction
-  return $ migrateFunc ++ concat decs
+  let getDecl name = do
+        info <- reify $ mkName name
+        return $ case info of
+          TyConI x -> case x of
+            d@DataD{}  -> d
+            NewtypeD{} -> error "Newtypes are not supported"
+            _ -> error $ "Unknown declaration type: " ++ name ++ " " ++ show x
+          _        -> error $ "Only datatypes can be processed: " ++ name
+      
+  entities  <- catMaybes <$> forM defs (\d -> case d of
+    PSEntityDef'   e -> Just . either error id . validateEntity   . applyEntitySettings namingStyle e . mkTHEntityDef namingStyle   <$> getDecl (psDataName e)
+    _ -> return Nothing)
+  embeddeds <- catMaybes <$> forM defs (\d -> case d of
+    PSEmbeddedDef' e -> Just . either error id . validateEmbedded . applyEmbeddedSettings e           . mkTHEmbeddedDef namingStyle <$> getDecl (psEmbeddedName e)
+    _ -> return Nothing)
+  primitives <- catMaybes <$> forM defs (\d -> case d of
+    PSPrimitiveDef'     e -> Just .                                 applyPrimitiveSettings e               . mkTHPrimitiveDef namingStyle     <$> getDecl (psPrimitiveName e)
+    _ -> return Nothing)
+  decs <- fmap (concat . concat) $ sequence [mapM mkEntityDecs entities, mapM mkEmbeddedDecs embeddeds, mapM mkPrimitiveDecs primitives]
+  migrateFunc <- maybe (return []) (\name -> mkMigrateFunction name entities) migrationFunction
+  return $ migrateFunc ++ decs
 
 applyEntitySettings :: NamingStyle -> PSEntityDef -> THEntityDef -> THEntityDef
 applyEntitySettings style PSEntityDef{..} def@(THEntityDef{..}) =
@@ -259,6 +270,12 @@ applyEmbeddedSettings PSEmbeddedDef{..} def@(THEmbeddedDef{..}) =
       , thEmbeddedFields = maybe thEmbeddedFields (f thEmbeddedFields) psEmbeddedFields
       } where
   f = foldr $ replaceOne "field" psFieldName thFieldName applyFieldSettings
+
+applyPrimitiveSettings :: PSPrimitiveDef -> THPrimitiveDef -> THPrimitiveDef
+applyPrimitiveSettings PSPrimitiveDef{..} def@(THPrimitiveDef{..}) =
+  def { thPrimitiveDbName = fromMaybe thPrimitiveDbName psPrimitiveDbName
+      , thPrimitiveStringRepresentation = fromMaybe thPrimitiveStringRepresentation psPrimitiveStringRepresentation
+      }
 
 mkFieldsForUniqueKey :: NamingStyle -> String -> THUniqueKeyDef -> THConstructorDef -> [THFieldDef]
 mkFieldsForUniqueKey style dName uniqueKey cDef = zipWith (setSelector . findField) (thUniqueFields uniqueDef) [0..] where
@@ -331,8 +348,8 @@ validateEmbedded def = do
   mapM_ validateField fields
   return def
 
-mkTHEntityDefWith :: NamingStyle -> Dec -> THEntityDef
-mkTHEntityDefWith NamingStyle{..} (DataD _ dName typeVars cons _) =
+mkTHEntityDef :: NamingStyle -> Dec -> THEntityDef
+mkTHEntityDef NamingStyle{..} (DataD _ dName typeVars cons _) =
   THEntityDef dName (mkDbEntityName dName') Nothing (Just $ THAutoKeyDef (mkEntityKeyName dName') True) [] typeVars constrs where
   constrs = zipWith mkConstr [0..] cons
   dName' = nameBase dName
@@ -353,10 +370,10 @@ mkTHEntityDefWith NamingStyle{..} (DataD _ dName typeVars cons _) =
     mkVarField cName (fName, _, t) fNum = THFieldDef fName' (apply mkDbFieldName) Nothing (apply mkExprFieldName) t Nothing Nothing Nothing where
       apply f = f dName' cName cNum fName' fNum
       fName' = nameBase fName
-mkTHEntityDefWith _ _ = error "Only datatypes can be processed"
+mkTHEntityDef _ _ = error "Only datatypes can be processed"
 
-mkTHEmbeddedDefWith :: NamingStyle -> Dec -> THEmbeddedDef
-mkTHEmbeddedDefWith (NamingStyle{..}) (DataD _ dName typeVars cons _) =
+mkTHEmbeddedDef :: NamingStyle -> Dec -> THEmbeddedDef
+mkTHEmbeddedDef (NamingStyle{..}) (DataD _ dName typeVars cons _) =
   THEmbeddedDef dName cName (mkDbEntityName dName') typeVars fields where
   dName' = nameBase dName
   
@@ -375,7 +392,13 @@ mkTHEmbeddedDefWith (NamingStyle{..}) (DataD _ dName typeVars cons _) =
   mkVarField cName' (fName, _, t) fNum = THFieldDef fName' (apply mkDbFieldName) Nothing (mkExprSelectorName dName' cName' fName' fNum) t Nothing Nothing Nothing where
     apply f = f dName' cName' 0 fName' fNum
     fName' = nameBase fName
-mkTHEmbeddedDefWith _ _ = error "Only datatypes can be processed"
+mkTHEmbeddedDef _ _ = error "Only datatypes can be processed"
+
+mkTHPrimitiveDef :: NamingStyle -> Dec -> THPrimitiveDef
+mkTHPrimitiveDef (NamingStyle{..}) (DataD _ dName _ _ _) =
+  THPrimitiveDef dName (mkDbEntityName dName') True where
+  dName' = nameBase dName
+mkTHPrimitiveDef _ _ = error "Only datatypes can be processed"
 
 firstLetter :: (Char -> Char) -> String -> String
 firstLetter f s = f (head s):tail s
@@ -445,15 +468,17 @@ toUnderscore = map toLower . go where
 --          - name: foo                  # The name as in constructor record. If constructor is not a record, the name is created by 'mkNormalFieldName'. For example, the fields in constructor SomeConstr would have names someConstr0 and someConstr1 by default.
 --            dbName: foo                # Column name
 --            exprName: FooField         # Name of a field used in expressions
---            \# type: varchar            # This would result in having field type DbOther \"varchar\" instead of DbString. Value of this attribute will be used by DB backend for migration
---            \# default: foo_value       # The default value for column in the clause
---            \# reference:               # This is explicit reference to a parent table not mapped by Groundhog
---            \#   schema: myschema       # Optional schema
---            \#   table: mytable         # Name of the parent table
---            \#   columns: [mytable_id]  # Parent columns. If the current field is embedded, e.g., a tuple, it will be a composite key
---            \#   onDelete: cascade      # Defines ON DELETE clause of references. It can have values: no action, restrict, cascade, set null, set default
---            \#   onUpdate: restrict     # Defines ON UPDATE
---            \# If onDelete or onUpdate are omitted, the database will choose the action automatically. Note that it may differ across databases. For example, MySQL has \"restrict\" by default, but in PostgreSQL it is \"no action\". They can be set not inside reference object, but at the same level. This placement is kept for compatibility and deprecated.
+--          \# type: varchar              # This would result in having field type DbOther \"varchar\" instead of DbString. Value of this attribute will be used by DB backend for migration
+--          \# default: foo_value         # The default value for column in the clause
+--          \# reference:                 # This is explicit reference to a parent table not mapped by Groundhog
+--          \#   schema: myschema         # Optional schema
+--          \#   table: mytable           # Name of the parent table
+--          \#   columns: [mytable_id]    # Parent columns. If the current field is embedded, e.g., a tuple, it will be a composite key
+--          \#   onDelete: cascade        # Defines ON DELETE clause of references. It can have values: no action, restrict, cascade, set null, set default
+--          \#   onUpdate: restrict       # Defines ON UPDATE
+--          \# onDelete: cascade          # Clauses onDelete and onUpdate can be set outside of reference too. This is deprecated and kept for compatibility
+--          \# If onDelete or onUpdate are omitted, the database will choose the action automatically. Note that it may differ across databases.
+--          \# For example, MySQL has \"restrict\" by default, but in PostgreSQL it is \"no action\".
 --          - name: bar
 --            dbName: bar
 --            exprName: BarField
@@ -502,6 +527,23 @@ toUnderscore = map toLower . go where
 --                                        # Street is not mentioned so it will have default settings.
 -- |]
 -- @
+--
+-- We can also make our types instances of `PrimitivePersistField` to store them in one column.
+--
+-- @
+--data WeekDay = Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday
+--  deriving (Eq, Show, Enum)
+--data Point = Point Int Int
+--  deriving (Eq, Show, Read)
+--
+--mkPersist defaultCodegenConfig [groundhog|
+--definitions:
+--  - primitive: WeekDay
+--    representation: enum                # Its column will have integer type. The conversion will use Enum instance.
+--  - primitive: Point
+--    representation: showread            # Its column will have string type. The conversion will use Show/Read instances. If representation is omitted, showread will be used by default.
+-- |]
+-- @
 
 -- | Converts quasiquoted settings into the datatype used by mkPersist.
 groundhog :: QuasiQuoter
@@ -513,13 +555,13 @@ groundhog = QuasiQuoter { quoteExp  = parseDefinitions
 
 -- | Parses configuration stored in the file
 --
--- > mkPersist suffixNamingStyle [groundhogFile|../groundhog.yaml|]
+-- > mkPersist defaultCodegenConfig [groundhogFile|../groundhog.yaml|]
 groundhogFile :: QuasiQuoter
 groundhogFile = quoteFile groundhog
 
 parseDefinitions :: String -> Q Exp
 parseDefinitions s = do
-  result <- runIO $ decodeHelper (Y.decode $ pack s)
+  result <- runIO $ decodeHelper (Y.decode $ encodeUtf8 $ fromString s)
   case result of
     Left err -> case err of
       InvalidYaml (Just (Y.YamlParseException problem context mark)) -> fail $ unlines
@@ -562,6 +604,16 @@ mkEmbeddedDecs def = do
     [ mkEmbeddedPersistFieldInstance def
     , mkEmbeddedPurePersistFieldInstance def
     , mkEmbeddedInstance def
+    ]
+--  runIO $ putStrLn $ pprint decs
+  return decs
+
+mkPrimitiveDecs :: THPrimitiveDef -> Q [Dec]
+mkPrimitiveDecs def = do
+  --runIO (print def)
+  decs <- fmap concat $ sequence
+    [ mkPrimitivePersistFieldInstance def
+    , mkPrimitivePrimitivePersistFieldInstance def
     ]
 --  runIO $ putStrLn $ pprint decs
   return decs

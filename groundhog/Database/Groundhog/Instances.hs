@@ -3,7 +3,7 @@
 module Database.Groundhog.Instances (Selector(..)) where
 
 import Database.Groundhog.Core
-import Database.Groundhog.Generic (primToPersistValue, primFromPersistValue, primToPurePersistValues, primFromPurePersistValues, primToSinglePersistValue, primFromSinglePersistValue, pureFromPersistValue, phantomDb)
+import Database.Groundhog.Generic (primToPersistValue, primFromPersistValue, primToPurePersistValues, primFromPurePersistValues, primToSinglePersistValue, primFromSinglePersistValue, phantomDb)
 
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -12,7 +12,7 @@ import Data.Bits (bitSize)
 import Data.ByteString.Char8 (ByteString, unpack)
 import Data.Int (Int8, Int16, Int32, Int64)
 import Data.Time (Day, TimeOfDay, UTCTime)
-import Data.Time.LocalTime (ZonedTime)
+import Data.Time.LocalTime (ZonedTime, zonedTimeToUTC, utc, utcToZonedTime)
 import Data.Word (Word8, Word16, Word32, Word64)
 
 instance (PersistField a', PersistField b') => Embedded (a', b') where
@@ -120,46 +120,55 @@ instance PrimitivePersistField ByteString where
 instance PrimitivePersistField Int where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Int8 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Int16 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Int32 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Int64 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Word8 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Word16 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Word32 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Word64 where
   toPrimitivePersistValue _ a = PersistInt64 (fromIntegral a)
   fromPrimitivePersistValue _ (PersistInt64 a) = fromIntegral a
+  fromPrimitivePersistValue _ (PersistDouble a) = truncate a
   fromPrimitivePersistValue _ x = readHelper x ("Expected Integer, received: " ++ show x)
 
 instance PrimitivePersistField Double where
@@ -187,11 +196,13 @@ instance PrimitivePersistField TimeOfDay where
 instance PrimitivePersistField UTCTime where
   toPrimitivePersistValue _ a = PersistUTCTime a
   fromPrimitivePersistValue _ (PersistUTCTime a) = a
+  fromPrimitivePersistValue _ (PersistZonedTime (ZT a)) = zonedTimeToUTC a
   fromPrimitivePersistValue _ x = readHelper x ("Expected UTCTime, received: " ++ show x)
 
 instance PrimitivePersistField ZonedTime where
   toPrimitivePersistValue _ a = PersistZonedTime (ZT a)
   fromPrimitivePersistValue _ (PersistZonedTime (ZT a)) = a
+  fromPrimitivePersistValue _ (PersistUTCTime a) = utcToZonedTime utc a
   fromPrimitivePersistValue _ x = readHelper x ("Expected ZonedTime, received: " ++ show x)
 
 instance (PrimitivePersistField a, NeverNull a) => PrimitivePersistField (Maybe a) where
@@ -444,7 +455,11 @@ instance (EntityConstr v c, PersistField a) => Projection (SubField v c a) db (R
   projectionResult _ = fromPersistValues
 
 instance PersistField a => Projection (Expr db r a) db r a where
-  projectionExprs e = (ExprRaw e:)
+  projectionExprs (Expr e) = (e:)
+  projectionResult _ = fromPersistValues
+
+instance a ~ Bool => Projection (Cond db r) db r a where
+  projectionExprs cond = (ExprCond cond:)
   projectionResult _ = fromPersistValues
 
 instance (EntityConstr v c, a ~ AutoKey v) => Projection (AutoKeyField v c) db (RestrictionHolder v c) a where
@@ -455,10 +470,10 @@ instance EntityConstr v c => Projection (c (ConstructorMarker v)) db (Restrictio
   projectionExprs c = ((map ExprField chains)++) where
     chains = map (\f -> (f, [])) $ constrParams constr
     e = entityDef ((undefined :: c (ConstructorMarker v) -> v) c)
-    cNum = entityConstrNum ((undefined :: c (ConstructorMarker v) -> Proxy v) c) c
+    cNum = entityConstrNum ((undefined :: c (ConstructorMarker v) -> proxy v) c) c
     constr = constructors e !! cNum
   projectionResult c xs = toSinglePersistValue cNum >>= \cNum' -> fromEntityPersistValues (cNum':xs) where
-    cNum = entityConstrNum ((undefined :: c (ConstructorMarker v) -> Proxy v) c) c
+    cNum = entityConstrNum ((undefined :: c (ConstructorMarker v) -> proxy v) c) c
 
 instance (PersistEntity v, IsUniqueKey k, k ~ Key v (Unique u), r ~ RestrictionHolder v c)
       => Projection (u (UniqueMarker v)) db r k where
@@ -466,7 +481,7 @@ instance (PersistEntity v, IsUniqueKey k, k ~ Key v (Unique u), r ~ RestrictionH
     UniqueDef _ _ uFields = constrUniques constr !! uniqueNum ((undefined :: u (UniqueMarker v) -> Key v (Unique u)) u)
     chains = map (\f -> (f, [])) uFields
     constr = head $ constructors (entityDef ((undefined :: u (UniqueMarker v) -> v) u))
-  projectionResult _ = pureFromPersistValue
+  projectionResult _ = fromPersistValues
 
 instance (Projection a1 db r a1', Projection a2 db r a2') => Projection (a1, a2) db r (a1', a2') where
   projectionExprs (a1, a2) = projectionExprs a1 . projectionExprs a2
@@ -515,7 +530,7 @@ instance (EntityConstr v c, a ~ AutoKey v) => FieldLike (AutoKeyField v c) db (R
     k = (undefined :: AutoKeyField v c -> AutoKey v) a
 
     e = entityDef ((undefined :: AutoKeyField v c -> v) a)
-    cNum = entityConstrNum ((undefined :: AutoKeyField v c -> Proxy v) a) ((undefined :: AutoKeyField v c -> c (ConstructorMarker v)) a)
+    cNum = entityConstrNum ((undefined :: AutoKeyField v c -> proxy v) a) ((undefined :: AutoKeyField v c -> c (ConstructorMarker v)) a)
 
 instance (EntityConstr v c, PersistField a) => FieldLike (SubField v c a) db (RestrictionHolder v c) a where
   fieldChain (SubField a) = a
@@ -531,7 +546,7 @@ instance (PersistEntity v, IsUniqueKey k, k ~ Key v (Unique u), r ~ RestrictionH
     constr = head $ constructors (entityDef ((undefined :: u (UniqueMarker v) -> v) u))
 
 instance (PersistEntity v, EntityConstr' (IsSumType v) c) => EntityConstr v c where
-  entityConstrNum v = entityConstrNum' $ (undefined :: Proxy v -> IsSumType v) v
+  entityConstrNum v = entityConstrNum' $ (undefined :: proxy v -> IsSumType v) v
 class EntityConstr' flag c where
   entityConstrNum' :: flag -> c (a :: * -> *) -> Int
 instance EntityConstr' HFalse c where
