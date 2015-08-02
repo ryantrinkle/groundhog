@@ -85,10 +85,11 @@ getQueries runUnsafe (Right migs) = (if runUnsafe || null unsafe
   then Right $ map (\(_, _, query) -> query) migs'
   else Left $
     [ "Database migration: manual intervention required."
-    , "The following actions are considered unsafe:"
-    ] ++ map (\(_, _, query) -> query) unsafe) where
+    , "The proposed migration is:"
+    ] ++ map (\(isUnsafe, _, query) -> (if isUnsafe then unsafeWarning else replicate (length unsafeWarning) ' ') ++ query) migs') where
   migs' = sortBy (compare `on` \(_, i, _) -> i) migs
   unsafe = filter (\(isUnsafe, _, _) -> isUnsafe) migs'
+  unsafeWarning = "<UNSAFE>  "
 
 executeMigration' :: (PersistBackend m, MonadIO m) => Bool -> Bool -> NamedMigrations -> m ()
 executeMigration' runUnsafe silent m = do
