@@ -18,7 +18,7 @@ import Database.Groundhog
 import Database.Groundhog.Core
 import Database.Groundhog.Expression
 import Database.Groundhog.Generic
-import Database.Groundhog.Generic.Migration hiding (MigrationPack(..))
+import Database.Groundhog.Generic.Migration hiding (MigrationPack(..), colIsEquivalent)
 import qualified Database.Groundhog.Generic.Migration as GM
 import Database.Groundhog.Generic.Sql
 import Database.Groundhog.Generic.Sql.Functions
@@ -645,8 +645,8 @@ showSqlType t = case t of
   DbOther (OtherTypeDef ts) -> concatMap (either id showSqlType) ts
 
 compareUniqs :: UniqueDefInfo -> UniqueDefInfo -> Bool
-compareUniqs (UniqueDef _ (UniquePrimary _) cols1) (UniqueDef _ (UniquePrimary _) cols2) = haveSameElems (==) cols1 cols2
-compareUniqs (UniqueDef name1 type1 cols1) (UniqueDef name2 type2 cols2) = fromMaybe True (liftM2 (==) name1 name2) && type1 == type2 && haveSameElems (==) cols1 cols2
+compareUniqs (UniqueDef _ (UniquePrimary _) cols1) (UniqueDef _ (UniquePrimary _) cols2) = haveSameElems (GM.colIsEquivalent escape) cols1 cols2
+compareUniqs (UniqueDef name1 type1 cols1) (UniqueDef name2 type2 cols2) = fromMaybe True (liftM2 (==) name1 name2) && type1 == type2 && haveSameElems (GM.colIsEquivalent escape) cols1 cols2
 
 compareRefs :: String -> (Maybe String, Reference) -> (Maybe String, Reference) -> Bool
 compareRefs currentSchema (_, Reference (sch1, tbl1) pairs1 onDel1 onUpd1) (_, Reference (sch2, tbl2) pairs2 onDel2 onUpd2) =

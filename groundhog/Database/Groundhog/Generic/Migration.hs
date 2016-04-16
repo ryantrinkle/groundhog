@@ -19,6 +19,7 @@ module Database.Groundhog.Generic.Migration
   , defaultMigConstr
   , showReferenceAction
   , readReferenceAction
+  , colIsEquivalent
   ) where
 
 import Database.Groundhog.Core
@@ -278,7 +279,7 @@ getAlters m@MigrationPack{..} (TableInfo oldColumns oldUniques oldRefs) (TableIn
       ++ colAlters
       ++ map dropUnique oldOnlyUniques
       ++ map AddUnique newOnlyUniques
-      ++ concatMap (uncurry migrateUniq) commonUniques
+      ++ concatMap (uncurry (migrateUniq m)) commonUniques
       ++ map (DropReference . fromMaybe (error "getAlters: old reference does not have name") . fst) oldOnlyRefs
       ++ map (AddReference . snd) newOnlyRefs
 
@@ -297,9 +298,17 @@ migrateColumn MigrationPack{..} (Column _ isNull1 type1 def1) (Column _ isNull2 
     (Just def1', Just def2') | compareDefaults def1' def2' -> []
     _ -> [maybe NoDefault Default def2]
 
+colIsEquivalent :: (String -> String) -> Either String String -> Either String String -> Bool
+colIsEquivalent escape col1 col2 = case (col1, col2) of
+  (Left colName1, Right colExpr2) -> exprIsName colExpr2 colName1
+  (Right colExpr1, Left colName2) -> exprIsName colExpr1 colName2
+  _ -> col1 == col2
+  where exprIsName :: String -> String -> Bool
+        exprIsName expr name = expr == name || expr == escape name
+
 -- from database, from datatype
-migrateUniq :: UniqueDefInfo -> UniqueDefInfo -> [AlterTable]
-migrateUniq u1@(UniqueDef _ _ cols1) u2@(UniqueDef _ _ cols2) = if haveSameElems (==) cols1 cols2
+migrateUniq :: MigrationPack m -> UniqueDefInfo -> UniqueDefInfo -> [AlterTable]
+migrateUniq m u1@(UniqueDef _ _ cols1) u2@(UniqueDef _ _ cols2) = if haveSameElems (colIsEquivalent (escape m)) cols1 cols2
   then []
   else [dropUnique u1, AddUnique u2]
 
