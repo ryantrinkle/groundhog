@@ -358,7 +358,7 @@ validateEmbedded def = do
   return def
 
 mkTHEntityDef :: NamingStyle -> Dec -> THEntityDef
-mkTHEntityDef NamingStyle{..} (DataD _ dName typeVars cons _) =
+mkTHEntityDef NamingStyle{..} (DataD _ dName typeVars _ cons _) =
   THEntityDef dName (mkDbEntityName dName') Nothing (Just $ THAutoKeyDef (mkEntityKeyName dName') True) [] typeVars constrs where
   constrs = zipWith mkConstr [0..] cons
   dName' = nameBase dName
@@ -368,6 +368,8 @@ mkTHEntityDef NamingStyle{..} (DataD _ dName typeVars cons _) =
     RecC name params -> mkConstr' name $ zipWith (mkVarField (nameBase name)) params [0..]
     InfixC{} -> error $ "Types with infix constructors are not supported" ++ show dName
     ForallC{} -> error $ "Types with existential quantification are not supported" ++ show dName
+    GadtC{} -> error $ "GADTs are not supported" ++ show dName
+    RecGadtC{} -> error $ "GADTs are not supported" ++ show dName
    where
     mkConstr' name params = THConstructorDef name (apply mkPhantomName) (apply mkDbConstrName) (Just $ apply mkDbConstrAutoKeyName) params [] where
       apply f = f dName' (nameBase name) cNum
@@ -382,7 +384,7 @@ mkTHEntityDef NamingStyle{..} (DataD _ dName typeVars cons _) =
 mkTHEntityDef _ _ = error "Only datatypes can be processed"
 
 mkTHEmbeddedDef :: NamingStyle -> Dec -> THEmbeddedDef
-mkTHEmbeddedDef (NamingStyle{..}) (DataD _ dName typeVars cons _) =
+mkTHEmbeddedDef (NamingStyle{..}) (DataD _ dName typeVars _ cons _) =
   THEmbeddedDef dName cName (mkDbEntityName dName') typeVars fields where
   dName' = nameBase dName
   
@@ -392,6 +394,8 @@ mkTHEmbeddedDef (NamingStyle{..}) (DataD _ dName typeVars cons _) =
       RecC name params -> (name, zipWith (mkVarField (nameBase name)) params [0..])
       InfixC{} -> error $ "Types with infix constructors are not supported" ++ show dName
       ForallC{} -> error $ "Types with existential quantification are not supported" ++ show dName
+      GadtC{} -> error $ "GADTs are not supported" ++ show dName
+      RecGadtC{} -> error $ "GADTs are not supported" ++ show dName
     _ -> error $ "An embedded datatype must have exactly one constructor: " ++ show dName
   
   mkField :: String -> StrictType -> Int -> THFieldDef
@@ -404,7 +408,7 @@ mkTHEmbeddedDef (NamingStyle{..}) (DataD _ dName typeVars cons _) =
 mkTHEmbeddedDef _ _ = error "Only datatypes can be processed"
 
 mkTHPrimitiveDef :: NamingStyle -> Dec -> THPrimitiveDef
-mkTHPrimitiveDef (NamingStyle{..}) (DataD _ dName _ _ _) =
+mkTHPrimitiveDef (NamingStyle{..}) (DataD _ dName _ _ _ _) =
   THPrimitiveDef dName (mkDbEntityName dName') True where
   dName' = nameBase dName
 mkTHPrimitiveDef _ _ = error "Only datatypes can be processed"

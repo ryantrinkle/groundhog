@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeFamilies, GADTs, TypeSynonymInstances, OverlappingInstances, MultiParamTypeClasses, FlexibleInstances, UndecidableInstances, CPP, ConstraintKinds #-}
+{-# LANGUAGE TypeFamilies, GADTs, TypeSynonymInstances, MultiParamTypeClasses, FlexibleInstances, UndecidableInstances, CPP, ConstraintKinds #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module Database.Groundhog.Instances (Selector(..)) where
 
@@ -71,7 +71,7 @@ instance PurePersistField () where
   toPurePersistValues _ _ = id
   fromPurePersistValues _ xs = ((), xs)
 
-instance (PurePersistField a, PurePersistField b) => PurePersistField (a, b) where
+instance {-# OVERLAPPING #-} (PurePersistField a, PurePersistField b) => PurePersistField (a, b) where
   toPurePersistValues p (a, b) = toPurePersistValues p a . toPurePersistValues p b
   fromPurePersistValues p xs = let
     (a, rest0) = fromPurePersistValues p xs
@@ -231,11 +231,11 @@ instance (DbDescriptor db, PersistEntity v, PersistField v) => PrimitivePersistF
   toPrimitivePersistValue p (KeyForBackend a) = toPrimitivePersistValue p a
   fromPrimitivePersistValue p x = KeyForBackend (fromPrimitivePersistValue p x)
 
-instance PrimitivePersistField a => PurePersistField a where
+instance {-# OVERLAPPABLE #-} (PersistField a, PrimitivePersistField a) => PurePersistField a where
   toPurePersistValues = primToPurePersistValues
   fromPurePersistValues = primFromPurePersistValues
 
-instance PrimitivePersistField a => SinglePersistField a where
+instance {-# OVERLAPPABLE #-} (PersistField a, PrimitivePersistField a) => SinglePersistField a where
   toSinglePersistValue = primToSinglePersistValue
   fromSinglePersistValue = primFromSinglePersistValue
 
@@ -283,7 +283,7 @@ instance PersistField Lazy.ByteString where
   fromPersistValues = primFromPersistValue
   dbType _ _ = DbTypePrimitive DbBlob False Nothing Nothing
 
-instance PersistField String where
+instance {-# OVERLAPPING #-} PersistField String where
   persistName _ = "String"
   toPersistValues = primToPersistValue
   fromPersistValues = primFromPersistValue
@@ -405,7 +405,7 @@ instance (PersistField a, NeverNull a) => PersistField (Maybe a) where
       DbEmbedded (EmbeddedDef concatName [(field, DbTypePrimitive t True def ref')]) ref
     t -> error $ "dbType " ++ persistName a ++ ": expected DbTypePrimitive or DbEmbedded with one field, got " ++ show t
 
-instance (PersistField a) => PersistField [a] where
+instance {-# OVERLAPPABLE #-} (PersistField a) => PersistField [a] where
   persistName a = "List" ++ delim : delim : persistName ((undefined :: [] a -> a) a)
   toPersistValues l = insertList l >>= toPersistValues
   fromPersistValues [] = fail "fromPersistValues []: empty list"

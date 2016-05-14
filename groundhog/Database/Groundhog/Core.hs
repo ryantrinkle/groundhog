@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, TypeFamilies, ExistentialQuantification, MultiParamTypeClasses, FunctionalDependencies, FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving, EmptyDataDecls, ConstraintKinds, CPP #-}
+{-# LANGUAGE GADTs, TypeFamilies, ExistentialQuantification, MultiParamTypeClasses, FunctionalDependencies, FlexibleContexts, FlexibleInstances, GeneralizedNewtypeDeriving, EmptyDataDecls, ConstraintKinds, CPP, UndecidableSuperClasses #-}
 {-# LANGUAGE UndecidableInstances #-} -- Required for Projection'
 -- | This module defines the functions and datatypes used throughout the framework.
 -- Most of them are for the internal use

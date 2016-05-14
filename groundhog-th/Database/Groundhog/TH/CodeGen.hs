@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, RecordWildCards, DoAndIfThenElse #-}
+{-# LANGUAGE TemplateHaskell, RecordWildCards, DoAndIfThenElse, RankNTypes #-}
 {-# LANGUAGE CPP #-}
 
 module Database.Groundhog.TH.CodeGen
@@ -29,7 +29,6 @@ import Database.Groundhog.Generic
 import Database.Groundhog.TH.Settings
 import Language.Haskell.TH
 import Language.Haskell.TH.Syntax (Lift(..))
-import Control.Applicative
 import Control.Arrow (second)
 import Control.Monad (liftM, liftM2, forM, forM_, foldM, filterM, replicateM)
 import Data.Either (lefts, rights)
@@ -99,7 +98,7 @@ mkEmbeddedPersistFieldInstance def = do
 
   let context = paramsContext (thEmbeddedTypeParams def) (thEmbeddedFields def)
   let decs = [persistName', toPersistValues', fromPersistValues', dbType']
-  return $ [InstanceD context (AppT (ConT ''PersistField) embedded) decs]
+  return $ [InstanceD Nothing context (AppT (ConT ''PersistField) embedded) decs]
 
 mkFromPersistValues :: Name -> Name -> Name -> [THFieldDef] -> Q (Bool, Exp)
 mkFromPersistValues failureName values constrName fieldDefs = do
@@ -176,7 +175,7 @@ mkPurePersistFieldInstance dataType cName fDefs context = do
       funD 'fromPurePersistValues [clause [varP proxy, varP xs] (normalB start) locals]
 
   let decs = [toPurePersistValues', fromPurePersistValues']
-  return $ [InstanceD context (AppT (ConT ''PurePersistField) dataType) decs]
+  return $ [InstanceD Nothing context (AppT (ConT ''PurePersistField) dataType) decs]
 
 mkEmbeddedPurePersistFieldInstance :: THEmbeddedDef -> Q [Dec]
 mkEmbeddedPurePersistFieldInstance def = do
@@ -209,7 +208,7 @@ mkAutoKeyPersistFieldInstance def = case thAutoKey def of
     
     let context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
     let decs = [persistName', toPersistValues', fromPersistValues', dbType']
-    return [InstanceD context (AppT (ConT ''PersistField) keyType) decs]
+    return [InstanceD Nothing context (AppT (ConT ''PersistField) keyType) decs]
   _ -> return []
 
 mkAutoKeyPrimitivePersistFieldInstance :: THEntityDef -> Q [Dec]
@@ -226,8 +225,8 @@ mkAutoKeyPrimitivePersistFieldInstance def = case thAutoKey def of
     fromPrim' <- funD 'fromPrimitivePersistValue [clause [wildP] (normalB $ conE conName) []]
     let context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
     let decs = [toPrim', fromPrim']
-    sequence [ return $ InstanceD context (AppT (ConT ''PrimitivePersistField) keyType) decs
-             , return $ InstanceD context (AppT (ConT ''NeverNull) keyType) []
+    sequence [ return $ InstanceD Nothing context (AppT (ConT ''PrimitivePersistField) keyType) decs
+             , return $ InstanceD Nothing context (AppT (ConT ''NeverNull) keyType) []
              , mkDefaultPurePersistFieldInstance context keyType
              , mkDefaultSinglePersistFieldInstance context keyType]
   _ -> return []
@@ -237,14 +236,14 @@ mkDefaultPurePersistFieldInstance context typ = do
   toPurePersistValues' <- funD 'toPurePersistValues [clause [] (normalB [| primToPurePersistValues |]) []]
   fromPurePersistValues' <- funD 'fromPurePersistValues [clause [] (normalB [| primFromPurePersistValues |]) []]
   let decs = [toPurePersistValues', fromPurePersistValues']
-  return $ InstanceD context (AppT (ConT ''PurePersistField) typ) decs
+  return $ InstanceD Nothing context (AppT (ConT ''PurePersistField) typ) decs
 
 mkDefaultSinglePersistFieldInstance :: Cxt -> Type -> Q Dec
 mkDefaultSinglePersistFieldInstance context typ = do
   toSinglePersistValue' <- funD 'toSinglePersistValue [clause [] (normalB [| primToSinglePersistValue |]) []]
   fromSinglePersistValue' <- funD 'fromSinglePersistValue [clause [] (normalB [| primFromSinglePersistValue |]) []]
   let decs = [toSinglePersistValue', fromSinglePersistValue']
-  return $ InstanceD context (AppT (ConT ''SinglePersistField) typ) decs
+  return $ InstanceD Nothing context (AppT (ConT ''SinglePersistField) typ) decs
 
 mkUniqueKeysIsUniqueInstances :: THEntityDef -> Q [Dec]
 mkUniqueKeysIsUniqueInstances def = do
@@ -263,7 +262,7 @@ mkUniqueKeysIsUniqueInstances def = do
       let uNum = maybe (error $ "mkUniqueKeysIsUniqueInstances: cannot find unique definition for unique key " ++ thUniqueKeyName unique) id index
       funD 'uniqueNum [clause [wildP] (normalB [| uNum |]) []]
     let context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
-    return $ InstanceD context (AppT (ConT ''IsUniqueKey) uniqKeyType) [extractUnique', uniqueNum']
+    return $ InstanceD Nothing context (AppT (ConT ''IsUniqueKey) uniqKeyType) [extractUnique', uniqueNum']
 
 mkUniqueKeysEmbeddedInstances :: THEntityDef -> Q [Dec]
 mkUniqueKeysEmbeddedInstances def = do
@@ -299,7 +298,7 @@ mkUniqueKeysPersistFieldInstances def = do
       funD 'dbType [clause [varP proxy, varP a] (normalB body) []]
     let context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
     let decs = [persistName', toPersistValues', fromPersistValues', dbType']
-    return $ InstanceD context (AppT (ConT ''PersistField) uniqKeyType) decs
+    return $ InstanceD Nothing context (AppT (ConT ''PersistField) uniqKeyType) decs
     
 mkUniqueKeysPrimitiveOrPurePersistFieldInstances :: THEntityDef -> Q [Dec]
 mkUniqueKeysPrimitiveOrPurePersistFieldInstances def = do
@@ -319,8 +318,8 @@ mkUniqueKeysPrimitiveOrPurePersistFieldInstances def = do
           funD 'toPrimitivePersistValue [clause [varP proxy, conP conName [varP x]] (normalB [| toPrimitivePersistValue $(varE proxy) $(varE x) |]) []]
         fromPrim' <- funD 'fromPrimitivePersistValue [clause [varP proxy, varP x] (normalB [| $(conE conName) (fromPrimitivePersistValue $(varE proxy) $(varE x)) |]) []]
         let decs = [toPrim', fromPrim']
-        sequence [ return $ InstanceD context (AppT (ConT ''PrimitivePersistField) uniqKeyType) decs
-                 , return $ InstanceD context (AppT (ConT ''NeverNull) uniqKeyType) decs
+        sequence [ return $ InstanceD Nothing context (AppT (ConT ''PrimitivePersistField) uniqKeyType) decs
+                 , return $ InstanceD Nothing context (AppT (ConT ''NeverNull) uniqKeyType) decs
                  , mkDefaultPurePersistFieldInstance context uniqKeyType
                  , mkDefaultSinglePersistFieldInstance context uniqKeyType]
       else mkPurePersistFieldInstance uniqKeyType conName (thUniqueKeyFields unique) context
@@ -364,12 +363,12 @@ mkKeyEqShowInstances def = do
       keyType <- [t| Key $(return entity) $u |]
       readPrec' <- funD 'R.readPrec [clause [] (normalB body) []]
       readListPrec' <- funD 'R.readListPrec [clause [] (normalB [| R.readListPrecDefault |]) []]
-      return $ InstanceD context (AppT (ConT ''Read) keyType) [readPrec', readListPrec']
+      return $ InstanceD Nothing context (AppT (ConT ''Read) keyType) [readPrec', readListPrec']
     in mapM mkRead keysInfo
 
   return $ if null keysInfo
     then []
-    else [InstanceD context (AppT (ConT ''Eq) typ) [eq'], InstanceD context (AppT (ConT ''Show) typ) [showsPrec']] ++ read'
+    else [InstanceD Nothing context (AppT (ConT ''Eq) typ) [eq'], InstanceD Nothing context (AppT (ConT ''Show) typ) [showsPrec']] ++ read'
 
 mkEmbeddedInstance :: THEmbeddedDef -> Q [Dec]
 mkEmbeddedInstance def = do
@@ -383,7 +382,7 @@ mkEmbeddedInstance' dataType fDefs context = do
   selector' <- do
     fParam <- newName "f"
     let mkField field = ForallC [] ([equalP' (VarT fParam) (thFieldType field)]) $ NormalC (mkName $ thExprName field) []
-    return $ DataInstD [] ''Selector [dataType, VarT fParam] (map mkField fDefs) []
+    return $ DataInstD [] ''Selector [dataType, VarT fParam] Nothing (map mkField fDefs) []
 
   selectorNum' <- do
     let mkClause fNum field = clause [conP (mkName $ thExprName field) []] (normalB $ lift fNum) []
@@ -391,7 +390,7 @@ mkEmbeddedInstance' dataType fDefs context = do
     funD 'selectorNum clauses
 
   let decs = [selector', selectorNum']
-  return $ [InstanceD context (AppT (ConT ''Embedded) dataType) decs]
+  return $ [InstanceD Nothing context (AppT (ConT ''Embedded) dataType) decs]
 
 mkEntityPhantomConstructors :: THEntityDef -> Q [Dec]
 mkEntityPhantomConstructors def = do
@@ -401,7 +400,7 @@ mkEntityPhantomConstructors def = do
     let name = mkName $ thPhantomConstrName c
     phantom <- [t| ConstructorMarker $(return entity) |]
     let constr = ForallC (thTypeParams def) [equalP' (VarT v) phantom] $ NormalC name []
-    return $ DataD [] name [PlainTV v] [constr] []
+    return $ DataD [] name [PlainTV v] Nothing [constr] []
   
 mkEntityPhantomConstructorInstances :: THEntityDef -> Q [Dec]
 mkEntityPhantomConstructorInstances def = sequence $ zipWith f [0..] $ thConstructors def where
@@ -420,7 +419,7 @@ mkEntityUniqueKeysPhantoms def = do
         let name = mkName $ thUniqueKeyPhantomName u
         phantom <- [t| UniqueMarker $(return entity) |]
         let constr = ForallC (thTypeParams def) [equalP' (VarT v) phantom] $ NormalC name []
-        return [DataD [] name [PlainTV v] [constr] []]
+        return [DataD [] name [PlainTV v] Nothing [constr] []]
       else return []
     
 mkPersistEntityInstance :: THEntityDef -> Q [Dec]
@@ -433,15 +432,15 @@ mkPersistEntityInstance def = do
       Nothing -> return []
       Just k -> do
         keyDescr <- [t| BackendSpecific |]
-        return [ForallC [] [equalP' (VarT uParam) keyDescr] $ NormalC (mkName $ thAutoKeyConstrName k) [(NotStrict, ConT ''PersistValue)]]
+        return [ForallC [] [equalP' (VarT uParam) keyDescr] $ NormalC (mkName $ thAutoKeyConstrName k) [(Bang NoSourceUnpackedness NoSourceStrictness, ConT ''PersistValue)]]
     uniques <- forM (thUniqueKeys def) $ \unique -> do
       uniqType <- [t| Unique $(conT $ mkName $ thUniqueKeyPhantomName unique) |]
       let cDef = head $ thConstructors def
           uniqFieldNames = lefts $ thUniqueFields $ findOne "unique" thUniqueName (thUniqueKeyName unique) $ thConstrUniques cDef
           uniqFields = concat $ flip map uniqFieldNames $ \name -> (filter ((== name) . thFieldName) $ thConstrFields cDef)
-          uniqFields' = map (\f -> (NotStrict, thFieldType f)) uniqFields
+          uniqFields' = map (\f -> (Bang NoSourceUnpackedness NoSourceStrictness, thFieldType f)) uniqFields
       return $ ForallC [] [equalP' (VarT uParam) uniqType] $ NormalC (mkName $ thUniqueKeyConstrName unique) uniqFields'
-    return $ DataInstD [] ''Key [entity, VarT uParam] (autoKey ++ uniques) []
+    return $ DataInstD [] ''Key [entity, VarT uParam] Nothing (autoKey ++ uniques) []
 
   autoKey' <- do
     autoType <- case thAutoKey def of
@@ -469,7 +468,7 @@ mkPersistEntityInstance def = do
     let mkField name field = ForallC [] [equalP' (VarT cParam) (ConT name), equalP' (VarT fParam) (thFieldType field)] $ NormalC (mkName $ thExprName field) []
     let f cdef = map (mkField $ mkName $ thPhantomConstrName cdef) $ thConstrFields cdef
     let constrs = concatMap f $ thConstructors def
-    return $ DataInstD [] ''Field [entity, VarT cParam, VarT fParam] constrs []
+    return $ DataInstD [] ''Field [entity, VarT cParam, VarT fParam] Nothing constrs []
     
   entityDef' <- do
     v <- newName "v"
@@ -572,7 +571,7 @@ mkPersistEntityInstance def = do
 
   let context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
   let decs = [key', autoKey', defaultKey', isSumType', fields', entityDef', toEntityPersistValues', fromEntityPersistValues', getUniques', entityFieldChain']
-  return $ [InstanceD context (AppT (ConT ''PersistEntity) entity) decs]
+  return $ [InstanceD Nothing context (AppT (ConT ''PersistEntity) entity) decs]
 
 mkToPurePersistValues :: Name -> [(Name, Type)] -> Q Exp
 mkToPurePersistValues proxy vars = do
@@ -633,7 +632,7 @@ mkEntityPersistFieldInstance def = case getDefaultKey def of
 
     let context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
     let decs = [persistName', toPersistValues', fromPersistValues', dbType']
-    return $ [InstanceD context (AppT (ConT ''PersistField) entity) decs]
+    return $ [InstanceD Nothing context (AppT (ConT ''PersistField) entity) decs]
   Nothing -> return []
 
 mkEntitySinglePersistFieldInstance :: THEntityDef -> Q [Dec]
@@ -651,7 +650,7 @@ mkEntitySinglePersistFieldInstance def = isDefaultKeyOneColumn def >>= \isOne ->
     toSinglePersistValue' <- funD 'toSinglePersistValue $ [ clause [] (normalB to) [] ]
     fromSinglePersistValue' <- funD 'fromSinglePersistValue $ [ clause [] (normalB from) []]
     let decs = [toSinglePersistValue', fromSinglePersistValue']
-    return [InstanceD context (AppT (ConT ''SinglePersistField) entity) decs]
+    return [InstanceD Nothing context (AppT (ConT ''SinglePersistField) entity) decs]
   _ -> return []
 
 mkEntityNeverNullInstance :: THEntityDef -> Q [Dec]
@@ -661,7 +660,7 @@ mkEntityNeverNullInstance def = do
       context = paramsContext (thTypeParams def) (thConstructors def >>= thConstrFields)
   isOne <- isDefaultKeyOneColumn def
   return $ if isOne
-    then [InstanceD context (AppT (ConT ''NeverNull) entity) []]
+    then [InstanceD Nothing context (AppT (ConT ''NeverNull) entity) []]
     else []
 
 mkPrimitivePersistFieldInstance :: THPrimitiveDef -> Q [Dec]
@@ -678,8 +677,8 @@ mkPrimitivePersistFieldInstance def = do
           else [| DbTypePrimitive DbInt32  False Nothing Nothing |]
     funD 'dbType $ [ clause [wildP, wildP] (normalB typ) [] ]
   let decs = [persistName', toPersistValues', fromPersistValues', dbType']
-  return [ InstanceD [] (AppT (ConT ''PersistField) primitive) decs
-         , InstanceD [] (AppT (ConT ''NeverNull) primitive) []
+  return [ InstanceD Nothing [] (AppT (ConT ''PersistField) primitive) decs
+         , InstanceD Nothing [] (AppT (ConT ''NeverNull) primitive) []
          ]
 
 mkPrimitivePrimitivePersistFieldInstance :: THPrimitiveDef -> Q [Dec]
@@ -703,7 +702,7 @@ mkPrimitivePrimitivePersistFieldInstance def = do
     funD 'fromPrimitivePersistValue [clause [varP proxy, varP x] (normalB body) []]
   let context = []
   let decs = [toPrim', fromPrim']
-  sequence $ [return $ InstanceD context (AppT (ConT ''PrimitivePersistField) primitive) decs
+  sequence $ [return $ InstanceD Nothing context (AppT (ConT ''PrimitivePersistField) primitive) decs
            , mkDefaultPurePersistFieldInstance context primitive
            , mkDefaultSinglePersistFieldInstance context primitive]
 
@@ -712,7 +711,7 @@ mkMigrateFunction name defs = do
   let (normal, polymorhpic) = partition (null . thTypeParams) defs
   forM_ polymorhpic $ \def -> reportWarning $ "Datatype " ++ show (thDataName def) ++ " will not be migrated automatically by function " ++ name ++ " because it has type parameters"
   let body = doE $ map (\def -> noBindS [| migrate (undefined :: $(conT $ thDataName def)) |]) normal
-  sig <- sigD (mkName name) [t| PersistBackend m => Migration m |]
+  sig <- sigD (mkName name) [t| forall m. PersistBackend m => Migration m |]
   func <- funD (mkName name) [clause [] (normalB body) []]
   return [sig, func]
 
