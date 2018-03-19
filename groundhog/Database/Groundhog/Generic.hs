@@ -316,8 +316,8 @@ runDb :: HasConn m cm conn => DbPersist conn m a -> m a
 runDb f = ask >>= withConn (runDbPersist f)
 
 -- | Runs action within connection. It can handle a simple connection, a pool of them, etc.
-runDbConn :: (MonadBaseControl IO m, MonadIO m, ConnectionManager cm conn) => DbPersist conn (NoLoggingT m) a -> cm -> m a
-runDbConn f cm = runNoLoggingT (withConn (runDbPersist f) cm)
+runDbConn :: (MonadBaseControl IO m, MonadIO m, ConnectionManager cm conn) => DbPersist conn m a -> cm -> m a
+runDbConn f cm = withConn (runDbPersist f) cm
 
 -- | It is similar to `runDbConn` but runs action without transaction. It can be useful if you use Groundhog within IO monad or in other cases when you cannot put `PersistBackend` instance into your monad stack.
 --
@@ -327,8 +327,8 @@ runDbConn f cm = runNoLoggingT (withConn (runDbPersist f) cm)
 --   someIOAction
 --   getValuesFromIO $ \\value -> runDbConnNoTransaction (insert_ value) conn
 -- @
-runDbConnNoTransaction :: (MonadBaseControl IO m, MonadIO m, ConnectionManager cm conn) => DbPersist conn (NoLoggingT m) a -> cm -> m a
-runDbConnNoTransaction f cm = runNoLoggingT (withConnNoTransaction (runDbPersist f) cm)
+runDbConnNoTransaction :: (MonadBaseControl IO m, MonadIO m, ConnectionManager cm conn) => DbPersist conn m a -> cm -> m a
+runDbConnNoTransaction f cm = withConnNoTransaction (runDbPersist f) cm
 
 -- | It helps to run 'withConnSavepoint' within a monad.
 withSavepoint :: (HasConn m cm conn, SingleConnectionManager cm conn, Savepoint conn) => String -> m a -> m a
